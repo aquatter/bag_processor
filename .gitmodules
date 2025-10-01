@@ -1,3 +1,6 @@
 [submodule "sort-cpp"]
 	path = sort-cpp
-	url = https://github.com/yasenh/sort-cpp.git
+	url = git@github.com:aquatter/sort-cpp.git
+[submodule "csvworker"]
+	path = csvworker
+	url = https://github.com/vadamsky/csvworker.git
