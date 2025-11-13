@@ -1,0 +1,11 @@
+CompileFlags:  
+    Add: 
+        - "-ferror-limit=0"
+        - "-fopenmp"
+        - "--include-directory=/usr/lib/gcc/x86_64-linux-gnu/13/include"
+        - "-std=c++20"
+
+Diagnostics: 
+    Suppress: 
+        - builtin_definition
+        - attribute_wrong_number_arguments

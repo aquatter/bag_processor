@@ -104,7 +104,7 @@ std::vector<ImageDetections> parse_csv(const std::string_view path) {
         dets.dets_.resize(json_dets.size());
 
         for (size_t i{0}; auto det : json_dets) {
-
+#if 0
           dets.dets_[i].code_ = det["attributes"]["code"].get<std::string>();
           dets.dets_[i].class_ = det["attributes"]["class"].get<std::string>();
 
@@ -115,7 +115,7 @@ std::vector<ImageDetections> parse_csv(const std::string_view path) {
               det["bbox"][2].get<int>() - dets.dets_[i].box_.x + 1;
           dets.dets_[i].box_.height =
               det["bbox"][3].get<int>() - dets.dets_[i].box_.y + 1;
-
+#endif
           ++i;
         }
 

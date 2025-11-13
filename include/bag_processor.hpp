@@ -1,24 +1,31 @@
 #pragma once
 #include <Eigen/Geometry>
 #include <GeographicLib/LocalCartesian.hpp>
+#include <boost/math/constants/constants.hpp>
+#include <cstddef>
 #include <cstdint>
+#include <feature_tracker.hpp>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <memory>
 #include <ng-log/logging.h>
 #include <opencv2/core.hpp>
 #include <optional>
 #include <rerun.hpp>
+#include <span>
 #include <string>
 #include <string_view>
 #include <types.hpp>
 #include <unordered_map>
+#include <vector>
 
 struct BagProcessorSettings {
   std::string bag_path_;
   std::string annotations_path_;
   std::string calibration_path_;
   std::string ground_truth_path_;
+  bool use_klt_;
   bool use_logger_;
+  std::shared_ptr<rerun::RecordingStream> rec_;
 };
 
 class BagProcessor {
@@ -36,51 +43,73 @@ public:
   BagProcessor &log_axis();
   BagProcessor &log_camera(int64_t timestamp);
   BagProcessor &log_poly(int64_t timestamp);
-  BagProcessor &log_track(const std::string_view track_id);
+  BagProcessor &log_track(size_t track_id);
 
-  BagProcessor &log_direction(const std::string_view track_id,
-                              int64_t timestamp, float ray_length);
+  BagProcessor &log_direction(size_t track_id, int64_t timestamp,
+                              float ray_length);
 
-  BagProcessor &log_track_directions(const std::string_view track_id,
-                                     float ray_length);
+  BagProcessor &log_track_directions(size_t track_id, float ray_length);
 
   BagProcessor &log_images(int64_t from, int64_t to);
 
-  Landmark triangulate(std::string track_id) const;
+  Landmark triangulate(size_t track_id) const;
   std::vector<Landmark> triangulate_tracks(double min_track_length = 5.0) const;
 
   void save_geojson(std::span<const Landmark> landmarks,
                     const std::string_view path) const;
 
+  std::string most_frequent_landmark() const;
+
 private:
   void load_calibration(const std::string_view path);
   void create_tracks();
+  void load_tracks();
   void load_measurements(const std::string_view path);
   void load_ground_truth_landmarks(const std::string_view path);
   void load_detections(const std::string_view path);
+  void calculate_most_frequent_landmark();
+  float estimate_azimuth(const Eigen::Isometry3d pose,
+                         const Eigen::Vector2f p2d) const;
 
   cv::Mat_<cv::Vec3b> load_image(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(int64_t timestamp) const;
-  std::optional<Eigen::Isometry3d>
-  estimate_camera_pos(const Detection &d) const;
+  std::optional<Eigen::Isometry3d> estimate_camera_pos(Detection &d);
   std::optional<Landmark> triangulate(const ImageTrack &track) const;
+  void collect_detections();
+  void track_features();
+  void change_angle(double angle_deg);
+
+  std::vector<size_t> get_valid_tracks();
 
   BagProcessorSettings set_;
-  std::unique_ptr<rerun::RecordingStream> rec_;
+  std::shared_ptr<rerun::RecordingStream> rec_;
   gtsam::Cal3_S2 gtsam_cal3_s2;
   cv::Mat_<double> camera_matrix_;
   cv::Mat_<double> dist_coeffs_;
-  std::unordered_map<std::string, ImageTrack> image_tracks_;
+  std::unordered_map<size_t, ImageTrack> image_tracks_;
   std::vector<CameraMeasurement> camera_;
   std::vector<GpsMeasurement> gps_;
-  std::vector<ImageDetections> image_detections_;
+  std::unordered_map<int64_t, ImageDetections> image_detections_;
   std::unique_ptr<GeographicLib::LocalCartesian> local_converter_;
   std::vector<Landmark> ground_truth_landmarks_;
+  std::string most_frequent_landmark_;
+  std::unordered_map<std::string, cv::Scalar> color_map_;
+  FeatureTracker::Settings feature_tracker_set_;
+  std::unique_ptr<FeatureTracker> feature_tracker_;
 
+  std::vector<size_t> valid_tracks_;
+  size_t track_num_;
+
+public:
   static constexpr int poly_degree_{3};
   static constexpr double search_radius_{20.0};
-  static constexpr int64_t camera_gps_delta_{1'000'000'000l};
-  // static constexpr int64_t camera_gps_delta_{0};
-  static constexpr double correction_angle_{2.0};
+  // static constexpr int64_t camera_gps_delta_{1'300'000'000l};
+  // static constexpr int64_t camera_gps_delta_{-30'000'000};
+  static constexpr int64_t camera_gps_delta_{0'000'000};
+  static constexpr double correction_angle_{0.0};
   static constexpr double dist_threshold_squared_{0.3 * 0.3};
+  static constexpr float angle_threshold_deg_{23.0f};
+  static constexpr double max_dist_to_track_sqr_{15.0 * 15.0};
+  static constexpr double azimuth_correction_threshold_{
+      45.0 * boost::math::double_constants::degree};
 };

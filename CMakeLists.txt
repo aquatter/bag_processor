@@ -19,6 +19,11 @@ find_package(nlohmann_json REQUIRED)
 find_package(range-v3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(ng-log REQUIRED)
+find_package(flann REQUIRED)
+find_package(OpenMP COMPONENTS CXX REQUIRED)
+
+add_subdirectory(open_vins/ov_core)
+add_subdirectory(bag_converter)
 
 # get_property(importTargets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY IMPORTED_TARGETS)
 # message("${importTargets}")
@@ -35,6 +40,9 @@ add_executable(${PROJECT_NAME}
     sort-cpp/src/tracker.cpp
     source/csv_parser.cpp
     source/bag_processor.cpp
+    source/feature_tracker.cpp
+    source/utils.cpp
+    source/types.cpp
     ${ALGLIB_SOURCES}
 )
 
@@ -52,6 +60,10 @@ target_link_libraries(${PROJECT_NAME}
     range-v3::range-v3 range-v3::meta range-v3::concepts
     yaml-cpp::yaml-cpp
     ng-log::ng-log
+    ov_core_lib
+    flann::flann
+    OpenMP::OpenMP_CXX
+    gpmf-extractor
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -59,9 +71,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     sort-cpp/include
     csvworker
     alglib-cpp
+    open_vins/ov_core/src
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
 )
+

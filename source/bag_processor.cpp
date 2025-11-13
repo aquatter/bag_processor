@@ -1,12 +1,13 @@
 #include <Eigen/Geometry>
-#include <Eigen/src/Core/Matrix.h>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
+#include <array>
 #include <bag_processor.hpp>
+#include <boost/math/constants/constants.hpp>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <csv_parser.hpp>
-#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fmt/color.h>
@@ -33,29 +34,37 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/core/matx.hpp>
-#include <opencv2/core/types.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <optional>
+#include <progress_bar.hpp>
 #include <random>
+#include <range/v3/algorithm/copy.hpp>
+#include <range/v3/algorithm/find_if.hpp>
 #include <range/v3/algorithm/max.hpp>
+#include <range/v3/algorithm/sort.hpp>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/iota.hpp>
 #include <range/v3/view/linear_distribute.hpp>
+#include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
 #include <rerun.hpp>
+#include <rerun/archetypes/geo_line_strings.hpp>
 #include <rerun/archetypes/geo_points.hpp>
 #include <rerun/archetypes/points3d.hpp>
+#include <rerun/components/class_id.hpp>
+#include <rerun/components/geo_line_string.hpp>
 #include <rerun/components/image_plane_distance.hpp>
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <stdexcept>
 #include <string>
 #include <tracker.h>
+#include <types.hpp>
 #include <unordered_map>
+#include <utils.hpp>
 #include <vector>
 #include <yaml-cpp/node/node.h>
 #include <yaml-cpp/node/parse.h>
@@ -65,347 +74,76 @@ using ranges::to;
 using ranges::views::enumerate;
 using ranges::views::ints;
 using ranges::views::linear_distribute;
+using ranges::views::take;
 using ranges::views::transform;
 using ranges::views::zip;
-
-std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
-get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
-                         Eigen::Vector3d query_point, ptrdiff_t ind) {
-
-  const double rad_squared{rad * rad};
-
-  Eigen::Vector2d first_point{};
-  Eigen::Vector2d last_point{};
-  std::deque<Eigen::Vector2d> points_queue;
-
-  int num_added{0};
-
-  for (ptrdiff_t i{ind - 1}; i >= 0; --i) {
-    if ((points[i].position_ - query_point).squaredNorm() < rad_squared or
-        num_added < 5) {
-      points_queue.emplace_front(points[i].position_.x(),
-                                 points[i].position_.y());
-      ++num_added;
-      first_point = points[i].position_.head(2);
-    } else {
-      break;
-    }
-  }
-
-  num_added = 0;
-  for (ptrdiff_t i{ind}; i < points.size(); ++i) {
-    if ((points[i].position_ - query_point).squaredNorm() < rad_squared or
-        num_added < 5) {
-      points_queue.emplace_back(points[i].position_.x(),
-                                points[i].position_.y());
-
-      ++num_added;
-      last_point = points[i].position_.head(2);
-    } else {
-      break;
-    }
-  }
-
-  last_point = (last_point - first_point).normalized();
-
-  return {
-      std::vector<Eigen::Vector2d>{points_queue.begin(), points_queue.end()},
-      last_point};
-}
-
-std::vector<rerun::Vec3D>
-interpolate_spline(std::span<const Eigen::Vector2d> points,
-                   Eigen::Vector2d query_point) {
-
-  alglib::spline1dinterpolant c;
-  alglib::real_1d_array x;
-  alglib::real_1d_array y;
-
-  std::vector<Eigen::Vector2d> sorted_points{points.begin(), points.end()};
-
-  x.setlength(points.size());
-  y.setlength(points.size());
-
-  std::vector<rerun::Vec3D> poly_points;
-
-  if (std::is_sorted(
-          points.begin(), points.end(),
-          [](const auto &a, const auto &b) { return a.x() < b.x(); }) or
-      std::is_sorted(points.begin(), points.end(),
-                     [](const auto &a, const auto &b) { return a.x() > b.x(); })
-
-  ) {
-
-    std::sort(sorted_points.begin(), sorted_points.end(),
-              [](const auto &a, const auto &b) { return a.x() < b.x(); });
-
-    for (auto &&[i, p] : enumerate(sorted_points)) {
-      x(i) = p.x();
-      y(i) = p.y();
-    }
-
-    alglib::spline1dbuildcubic(x, y, c);
-
-    for (auto &&x_val : linear_distribute(sorted_points.front().x(),
-                                          sorted_points.back().x(), 30)) {
-
-      poly_points.emplace_back(x_val, alglib::spline1dcalc(c, x_val), 0.0);
-    }
-  } else if (std::is_sorted(
-                 points.begin(), points.end(),
-                 [](const auto &a, const auto &b) { return a.y() < b.y(); }) or
-             std::is_sorted(
-                 points.begin(), points.end(),
-                 [](const auto &a, const auto &b) { return a.y() > b.y(); })) {
-
-    std::sort(sorted_points.begin(), sorted_points.end(),
-              [](const auto &a, const auto &b) { return a.y() < b.y(); });
-
-    for (auto &&[i, p] : enumerate(sorted_points)) {
-      x(i) = p.y();
-      y(i) = p.x();
-    }
-
-    alglib::spline1dbuildakima(x, y, c);
-
-    for (auto &&y_val : linear_distribute(sorted_points.front().y(),
-                                          sorted_points.back().y(), 30)) {
-
-      poly_points.emplace_back(alglib::spline1dcalc(c, y_val), y_val, 0.0);
-    }
-  }
-
-  return poly_points;
-}
-
-std::optional<Eigen::Vector2d>
-estimate_direction_spline(std::span<const Eigen::Vector2d> points,
-                          Eigen::Vector2d query_point) {
-  alglib::spline1dinterpolant c;
-  alglib::real_1d_array x;
-  alglib::real_1d_array y;
-
-  x.setlength(points.size());
-  y.setlength(points.size());
-
-  const size_t n{points.size() - 1};
-
-  if (std::is_sorted(
-          points.begin(), points.end(),
-          [](const auto &a, const auto &b) { return a.x() < b.x(); })) {
-
-    for (auto &&[i, p] : enumerate(points)) {
-      x(i) = p.x();
-      y(i) = p.y();
-    }
-
-    alglib::spline1dbuildakima(x, y, c);
-
-    double y_val{0.0};
-    double d_y_val{0.0};
-    double d2_y_val{0.0};
-
-    alglib::spline1ddiff(c, query_point.x(), y_val, d_y_val, d2_y_val);
-    return Eigen::Vector2d{1.0, d_y_val}.normalized();
-
-  } else if (std::is_sorted(
-                 points.begin(), points.end(),
-                 [](const auto &a, const auto &b) { return a.x() > b.x(); })) {
-
-    for (auto &&[i, p] : enumerate(points)) {
-      x(n - i) = p.x();
-      y(n - i) = p.y();
-    }
-
-    alglib::spline1dbuildakima(x, y, c);
-
-    double y_val{0.0};
-    double d_y_val{0.0};
-    double d2_y_val{0.0};
-
-    alglib::spline1ddiff(c, query_point.x(), y_val, d_y_val, d2_y_val);
-    return Eigen::Vector2d{1.0, d_y_val}.normalized();
-
-  } else if (std::is_sorted(
-                 points.begin(), points.end(),
-                 [](const auto &a, const auto &b) { return a.y() < b.y(); })) {
-
-    for (auto &&[i, p] : enumerate(points)) {
-      x(i) = p.y();
-      y(i) = p.x();
-    }
-
-    alglib::spline1dbuildakima(x, y, c);
-
-    double y_val{0.0};
-    double d_y_val{0.0};
-    double d2_y_val{0.0};
-
-    alglib::spline1ddiff(c, query_point.y(), y_val, d_y_val, d2_y_val);
-    return Eigen::Vector2d{d_y_val, 1.0}.normalized();
-
-  } else if (std::is_sorted(
-                 points.begin(), points.end(),
-                 [](const auto &a, const auto &b) { return a.y() > b.y(); })) {
-    for (auto &&[i, p] : enumerate(points)) {
-      x(n - i) = p.y();
-      y(n - i) = p.x();
-    }
-
-    alglib::spline1dbuildakima(x, y, c);
-
-    double y_val{0.0};
-    double d_y_val{0.0};
-    double d2_y_val{0.0};
-
-    alglib::spline1ddiff(c, query_point.y(), y_val, d_y_val, d2_y_val);
-    // return Eigen::Vector2d{1.0, -d_y_val}.normalized();
-    return Eigen::Vector2d{d_y_val, 1.0}.normalized();
-  }
-
-  LOG(WARNING) << "unable to approximate spline";
-  return std::nullopt;
-}
-
-template <int degree>
-std::tuple<Eigen::Vector2d, std::array<double, degree + 1>, bool>
-estimate_direction(std::span<const Eigen::Vector2d> points,
-                   Eigen::Vector2d query_point) {
-
-  bool horizontal_dir{true};
-
-  {
-    auto [min_x, max_x] = std::minmax_element(
-        points.begin(), points.end(),
-        [](const auto &a, const auto &b) { return a.x() < b.x(); });
-
-    auto [min_y, max_y] = std::minmax_element(
-        points.begin(), points.end(),
-        [](const auto &a, const auto &b) { return a.y() < b.y(); });
-
-    horizontal_dir =
-        (max_x->x() - min_x->x()) > (max_y->y() - min_y->y()) ? true : false;
-  }
-
-  const int n{static_cast<int>(points.size())};
-
-  Eigen::MatrixXd A;
-  Eigen::MatrixXd b;
-  A.resize(n, degree + 1);
-  b.resize(n, 1);
-
-  if (horizontal_dir) {
-    for (auto &&[i, p] : enumerate(points)) {
-      double x_val{1.0};
-
-      for (int &&j : ints(0, degree + 1)) {
-        A(i, j) = x_val;
-        x_val *= static_cast<double>(p.x());
-      }
-
-      b(i) = p.y();
-    }
-  } else {
-    for (auto &&[i, p] : enumerate(points)) {
-      double x_val{1.0};
-
-      for (int &&j : ints(0, degree + 1)) {
-        A(i, j) = x_val;
-        x_val *= static_cast<double>(p.y());
-      }
-
-      b(i) = p.x();
-    }
-  }
-
-  const Eigen::MatrixXd p{(A.transpose() * A).ldlt().solve(A.transpose() * b)};
-
-  std::array<double, degree + 1> poly{};
-  for (auto &&i : ints(0, degree + 1)) {
-    poly[i] = p(i);
-  }
-
-  if (horizontal_dir) {
-    double y_prime{0.0};
-    double x_val{1.0};
-
-    for (auto &&i : ints(1, degree + 1)) {
-      y_prime += p(i) * x_val * static_cast<double>(i);
-      x_val *= query_point.x();
-    }
-
-    return {Eigen::Vector2d{1.0, y_prime}.normalized(), poly, horizontal_dir};
-  }
-
-  double x_prime{0.0};
-  double y_val{1.0};
-
-  for (auto &&i : ints(1, degree + 1)) {
-    x_prime += p(i) * y_val * static_cast<double>(i);
-    y_val *= query_point.y();
-  }
-
-  return {Eigen::Vector2d{x_prime, 1.0}.normalized(), poly, horizontal_dir};
-}
-
-Eigen::Vector3d triangulate_gtsam(
-    const gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> &cameras,
-    const gtsam::Point2Vector &measurements) {
-
-  auto p3d{gtsam::triangulateDLT(gtsam::projectionMatricesFromCameras(cameras),
-                                 measurements)};
-
-  const auto measurement_noise{gtsam::noiseModel::Isotropic::Sigma(2, 1.0)};
-
-  const auto [graph, values] = gtsam::triangulationGraph(
-      cameras, measurements, gtsam::Symbol{'p', 0}, p3d, measurement_noise);
-
-  gtsam::LevenbergMarquardtParams params;
-  params.verbosityLM = gtsam::LevenbergMarquardtParams::TRYLAMBDA;
-  params.verbosity = gtsam::NonlinearOptimizerParams::ERROR;
-  params.lambdaInitial = 1;
-  params.lambdaFactor = 10;
-  params.maxIterations = 100;
-  params.absoluteErrorTol = 1.0;
-  params.verbosityLM = gtsam::LevenbergMarquardtParams::SILENT;
-  params.verbosity = gtsam::NonlinearOptimizerParams::SILENT;
-  params.linearSolverType =
-      gtsam::NonlinearOptimizerParams::MULTIFRONTAL_CHOLESKY;
-
-  gtsam::LevenbergMarquardtOptimizer optimizer{graph, values, params};
-  gtsam::Values result{optimizer.optimize()};
-
-  gtsam::Marginals marginals{graph, result};
-  auto cov{marginals.marginalCovariance(gtsam::Symbol{'p', 0})};
-
-  std::cout << cov << std::endl;
-  std::cout << "determinant: " << cov.determinant() << std::endl;
-
-  return result.at<gtsam::Point3>(gtsam::Symbol{'p', 0});
-}
 
 BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
 
   if (set.use_logger_) {
-    rec_ = std::make_unique<rerun::RecordingStream>("bag_converter");
-    rec_->connect_grpc().exit_on_failure();
+    rec_ = set_.rec_;
   }
 
   load_measurements(set.bag_path_);
   load_calibration(set.calibration_path_);
-  load_detections(set.annotations_path_);
+  load_tracks();
+  collect_detections();
+  link_detections(image_detections_);
+  link_tracks(image_tracks_, image_detections_);
 
-  for (auto &&image_det : image_detections_) {
-    image_det.timestamp_ = camera_[image_det.id_].timestamp_;
+  load_ground_truth_landmarks(set.ground_truth_path_);
+  calculate_most_frequent_landmark();
+
+  LOG(INFO) << "num detections: " << image_detections_.size();
+  valid_tracks_ = get_valid_tracks();
+  LOG(INFO) << "num valid tracks: " << valid_tracks_.size();
+  track_features();
+
+  Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
+
+  float max_auc{0.0f};
+  Metrics::Result best_result{};
+  float best_angle{0.0f};
+  std::vector<Landmark> best_landmarks{};
+
+  for (auto &&angle : linear_distribute(-10.0, 10.0, 21)) {
+    change_angle(angle);
+    auto found_landmarks{triangulate_tracks()};
+    auto res{metrics.eval(found_landmarks)};
+
+    if (max_auc < res.auc_) {
+      max_auc = res.auc_;
+      best_result = std::move(res);
+      best_angle = angle;
+      best_landmarks = std::move(found_landmarks);
+    }
   }
 
-  create_tracks();
-  load_ground_truth_landmarks(set.ground_truth_path_);
+  best_result.save("/root/data/domodedovo_gopro13.json", "Domodedovo GoPro13");
+}
 
+void BagProcessor::collect_detections() {
+
+  for (auto &&[track_id, track] : image_tracks_) {
+    for (auto &&det : track.dets_) {
+      image_detections_[det.timestamp_].det_id_to_detection_[det.det_id_] =
+          &det;
+      image_detections_[det.timestamp_].track_id_to_detection_[det.track_id_] =
+          &det;
+      image_detections_[det.timestamp_].dets_.push_back(&det);
+      image_detections_[det.timestamp_].timestamp_ = det.timestamp_;
+    }
+  }
+}
+
+std::string BagProcessor::most_frequent_landmark() const {
+  return most_frequent_landmark_;
+}
+
+void BagProcessor::calculate_most_frequent_landmark() {
   std::unordered_map<std::string, int> landmark_frequency{};
 
   int max_frequency{0};
-  std::string most_frequent_landmark{};
 
   for (auto &&landmark : ground_truth_landmarks_) {
 
@@ -417,12 +155,11 @@ BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
 
     if (max_frequency < landmark_frequency[landmark.code_]) {
       max_frequency = landmark_frequency[landmark.code_];
-      most_frequent_landmark = landmark.code_;
+      most_frequent_landmark_ = landmark.code_;
     }
   }
 
-  LOG(INFO) << "mos frequent landmark: " << most_frequent_landmark;
-  LOG(INFO) << "num detections: " << image_detections_.size();
+  LOG(INFO) << "most frequent landmark: " << most_frequent_landmark_;
 }
 
 void BagProcessor::load_calibration(const std::string_view path) {
@@ -431,6 +168,9 @@ void BagProcessor::load_calibration(const std::string_view path) {
   const auto intrinsics{calib["cam0"]["intrinsics"].as<std::vector<double>>()};
   const auto distortion{
       calib["cam0"]["distortion_coeffs"].as<std::vector<double>>()};
+
+  feature_tracker_set_.width_ = calib["cam0"]["resolution"][0].as<int>();
+  feature_tracker_set_.height_ = calib["cam0"]["resolution"][1].as<int>();
 
   camera_matrix_ = cv::Mat_<double>::eye(3, 3);
   camera_matrix_(0, 0) = intrinsics[0];
@@ -442,10 +182,13 @@ void BagProcessor::load_calibration(const std::string_view path) {
 
   gtsam_cal3_s2 = gtsam::Cal3_S2{intrinsics[0], intrinsics[1], 0.0,
                                  intrinsics[2], intrinsics[3]};
+
+  ranges::copy(intrinsics, feature_tracker_set_.intrinsics_.begin());
+  ranges::copy(distortion, feature_tracker_set_.distortion_.begin());
 }
 
 void BagProcessor::load_detections(const std::string_view path) {
-
+#if 0
   std::ifstream f{path.data()};
 
   if (f.is_open() and f.good()) {
@@ -470,7 +213,9 @@ void BagProcessor::load_detections(const std::string_view path) {
           json_root["stamp_sec"].get<int64_t>() * 1'000'000'000l +
           json_root["stamp_nanosec"].get<int64_t>() + camera_gps_delta_;
 
-      image_detections.id_ = json_root["frame_idx"].get<uint64_t>();
+      if (json_root.contains("frame_idx")) {
+        image_detections.id_ = json_root["frame_idx"].get<uint64_t>();
+      }
 
       image_detections.dets_.reserve(num_objects);
 
@@ -479,6 +224,11 @@ void BagProcessor::load_detections(const std::string_view path) {
         if (det["label"].get<std::string>() != "traffic_sign") {
           continue;
         }
+
+        // if (det["attributes"]["code"] == "UNK") {
+        //   continue;
+        // }
+
         Detection im_det;
 
         im_det.id_ = 0;
@@ -493,6 +243,7 @@ void BagProcessor::load_detections(const std::string_view path) {
             static_cast<float>(det["bbox"][3].get<int>() + 0.5f) -
             im_det.box_.y + 1;
         im_det.confidence_ = det["confidence"].get<float>();
+        im_det.timestamp_ = image_detections.timestamp_;
 
         image_detections.dets_.emplace_back(im_det);
       }
@@ -508,9 +259,130 @@ void BagProcessor::load_detections(const std::string_view path) {
   std::sort(
       image_detections_.begin(), image_detections_.end(),
       [](const auto &a, const auto &b) { return a.timestamp_ < b.timestamp_; });
+
+#endif
+}
+
+void BagProcessor::load_tracks() {
+
+  std::ifstream f{set_.annotations_path_};
+
+  if (f.is_open() and f.good()) {
+
+    nlohmann::json json_root = nlohmann::json::parse(f);
+    const auto num_tracks{json_root["tracks"].size()};
+
+    image_tracks_.reserve(num_tracks);
+
+    size_t track_id{0};
+    size_t detection_id{0};
+
+    for (auto &&json_track : json_root["tracks"]) {
+
+      if (json_track["label"].get<std::string>() != "traffic_sign") {
+        continue;
+      }
+
+      const auto sign_code{json_track["attributes"]["code"].get<std::string>()};
+
+      if (sign_code == "UNK") {
+        continue;
+      }
+
+      const auto sign_class{
+          json_track["attributes"]["class"].get<std::string>()};
+
+      const auto num_dets{json_track["occurrences"].size()};
+
+      ImageTrack track{};
+      track.id_ = track_id;
+      track.code_ = sign_code;
+      track.length_ = 0.0;
+
+      for (auto &&json_det : json_track["occurrences"]) {
+
+        Detection det{};
+        det.timestamp_ =
+            json_det["timestamp"].get<int64_t>() + camera_gps_delta_;
+        det.box_.x = json_det["bbox"][0].get<int>();
+        det.box_.y = json_det["bbox"][1].get<int>();
+        det.box_.width = json_det["bbox"][2].get<int>() - det.box_.x + 1;
+        det.box_.height = json_det["bbox"][3].get<int>() - det.box_.y + 1;
+        det.code_ = sign_code;
+        det.class_ = sign_class;
+        det.center_ = {det.box_.x + (det.box_.width >> 1),
+                       det.box_.y + (det.box_.height >> 1)};
+        det.det_id_ = detection_id;
+        det.track_id_ = track_id;
+        det.cumulative_length_ = 0.0;
+
+        std::vector<cv::Point2f> points{};
+        points.push_back(cv::Point2f{det.center_});
+        cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
+
+        det.center_undistorted_ = points.front();
+
+        track.dets_.emplace_back(det);
+        track.stamp_to_detection_[det.timestamp_] = &track.dets_.back();
+        ++detection_id;
+      }
+
+      image_tracks_[track_id] = std::move(track);
+      ++track_id;
+    }
+  }
+
+  for (auto &&[track_id, track] : image_tracks_) {
+
+    bool first_pose{true};
+    Eigen::Vector3d prev_pose{};
+    double length{0.0};
+
+    for (auto &&d : track.dets_) {
+
+      const auto it{
+          std::upper_bound(gps_.begin(), gps_.end(), d.timestamp_,
+                           [](const double val, const GpsMeasurement &m) {
+                             return val < m.timestamp_;
+                           })};
+
+      if (it != gps_.end()) {
+        const auto ind{std::distance(gps_.begin(), it)};
+
+        if (ind > 0) {
+
+          const auto t{
+              static_cast<double>(d.timestamp_ - gps_[ind - 1].timestamp_) /
+              static_cast<double>(gps_[ind].timestamp_ -
+                                  gps_[ind - 1].timestamp_)};
+
+          d.pose_ = Eigen::Vector3d{gps_[ind - 1].position_ * (1.0 - t) +
+                                    gps_[ind].position_ * t};
+
+          d.gps_ind_ = ind;
+        }
+      }
+
+      if (d.pose_.has_value()) {
+        if (first_pose) {
+          first_pose = false;
+          prev_pose = d.pose_.value();
+        } else {
+          length += (d.pose_.value() - prev_pose).norm();
+          prev_pose = d.pose_.value();
+        }
+      }
+
+      d.cumulative_length_ = length;
+    }
+    track.length_ = length;
+  }
+
+  LOG(INFO) << "num loaded tracks: " << image_tracks_.size();
 }
 
 void BagProcessor::create_tracks() {
+#if 0
   // image_detections_ = parse_csv(path);
 
   std::unordered_map<std::string, Tracker> trackers;
@@ -532,6 +404,11 @@ void BagProcessor::create_tracks() {
     if (dets_it != image_detections_.end()) {
 
       for (auto &&d : dets_it->dets_) {
+
+        if (d.code_ == "UNK" or d.class_ == "UNLINK_CLASS") {
+          continue;
+        }
+
         det_map[d.code_].push_back(d.box_);
 
         if (not trackers.contains(d.code_)) {
@@ -587,11 +464,11 @@ void BagProcessor::create_tracks() {
 
             const auto track_id{fmt::format("{}_{}", code, id)};
 
-            if (not image_tracks_.contains(track_id)) {
-              image_tracks_[track_id].id_ = track_id;
+            if (not image_tracks_.contains(id)) {
+              image_tracks_[id].id_ = id;
             }
 
-            image_tracks_[track_id].dets_.emplace_back(d);
+            image_tracks_[id].dets_.emplace_back(d);
           }
         }
       }
@@ -660,6 +537,7 @@ void BagProcessor::create_tracks() {
   }
 
   LOG(INFO) << "num created tracks: " << image_tracks_.size();
+#endif
 }
 
 void BagProcessor::load_measurements(const std::string_view path) {
@@ -670,7 +548,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
 
   reader.open(path.data());
 
-  Eigen::Vector3d prev_enu{Eigen::Vector3d::Zero()};
+  // Eigen::Vector3d prev_enu{Eigen::Vector3d::Zero()};
 
   uint64_t frame_idx{0};
 
@@ -701,21 +579,27 @@ void BagProcessor::load_measurements(const std::string_view path) {
         local_converter_ = std::make_unique<GeographicLib::LocalCartesian>(
             gps_msg.latitude, gps_msg.longitude, gps_msg.altitude);
 
-        gps_.emplace_back(timestamp, prev_enu,
-                          Eigen::Vector3d{gps_msg.latitude, gps_msg.longitude,
-                                          gps_msg.altitude});
+        // gps_.emplace_back(timestamp, prev_enu,
+        //                   Eigen::Vector3d{gps_msg.latitude,
+        //                   gps_msg.longitude,
+        //                                   gps_msg.altitude});
       }
 
       Eigen::Vector3d enu{};
       local_converter_->Forward(gps_msg.latitude, gps_msg.longitude,
                                 gps_msg.altitude, enu.x(), enu.y(), enu.z());
 
-      if ((enu - prev_enu).squaredNorm() >= 1.0) {
-        gps_.emplace_back(timestamp, enu,
-                          Eigen::Vector3d{gps_msg.latitude, gps_msg.longitude,
-                                          gps_msg.altitude});
-        prev_enu = enu;
-      }
+      gps_.emplace_back(timestamp, enu,
+                        Eigen::Vector3d{gps_msg.latitude, gps_msg.longitude,
+                                        gps_msg.altitude});
+
+      // if ((enu - prev_enu).squaredNorm() >= 1.0) {
+      //   gps_.emplace_back(timestamp, enu,
+      //                     Eigen::Vector3d{gps_msg.latitude,
+      //                     gps_msg.longitude,
+      //                                     gps_msg.altitude});
+      //   prev_enu = enu;
+      // }
     }
   }
 
@@ -735,11 +619,13 @@ void BagProcessor::load_ground_truth_landmarks(const std::string_view path) {
     nlohmann::json j{};
     f >> j;
 
-    for (auto &&[i, feature] : enumerate(j["features"])) {
+    size_t landmark_id{0};
+
+    for (auto &&feature : j["features"]) {
 
       Landmark landmark{};
 
-      landmark.id_ = i;
+      landmark.id_ = landmark_id;
       landmark.code_ = feature["properties"]["sign_id"].get<std::string>();
 
       double longitude{0.0};
@@ -765,6 +651,7 @@ void BagProcessor::load_ground_truth_landmarks(const std::string_view path) {
       landmark.position_ = enu;
 
       ground_truth_landmarks_.push_back(landmark);
+      ++landmark_id;
 
       if (not feature["properties"]["plate_id"].is_null()) {
 
@@ -775,8 +662,10 @@ void BagProcessor::load_ground_truth_landmarks(const std::string_view path) {
         std::string token{};
 
         while (std::getline(string_stream, token, ';')) {
+          landmark.id_ = landmark_id;
           landmark.code_ = token;
           ground_truth_landmarks_.push_back(landmark);
+          ++landmark_id;
         }
       }
     }
@@ -812,22 +701,19 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
 }
 
 std::optional<Eigen::Isometry3d>
-BagProcessor::estimate_camera_pos(const Detection &d) const {
+BagProcessor::estimate_camera_pos(Detection &d) {
   const auto [points_in_the_radius, direction] = get_points_in_the_radius(
       gps_, search_radius_, d.pose_.value(), d.gps_ind_);
 
   if (points_in_the_radius.size() < 5) {
-    LOG(WARNING) << "unable to interpolate spline, too little points: "
+    LOG(WARNING) << "unable to interpolate path, too little points: "
                  << points_in_the_radius.size() << ", " << d.timestamp_;
     return std::nullopt;
   }
 
   std::optional<Eigen::Vector2d> estimated_direction{};
-  // estimate_direction_spline(points_in_the_radius,
-  // d.pose_.value().head(2))};
 
   if (not estimated_direction.has_value()) {
-    // LOG(WARNING) << "fallback to poly approximation";
 
     const auto [dir, poly_coeffs, hor_dir] = estimate_direction<poly_degree_>(
         points_in_the_radius, d.pose_.value().head(2));
@@ -841,9 +727,12 @@ BagProcessor::estimate_camera_pos(const Detection &d) const {
       estimated_direction.value() *= -1.0;
     }
 
+    d.direction_ = estimated_direction;
+
     return Eigen::Isometry3d{
         Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
-        Eigen::AngleAxisd{correction_angle_ * std::numbers::pi / 180.0,
+        Eigen::AngleAxisd{correction_angle_ *
+                              boost::math::double_constants::degree,
                           Eigen::Vector3d::UnitZ()} *
         Eigen::AngleAxisd{-std::atan2(estimated_direction.value().x(),
                                       estimated_direction.value().y()),
@@ -880,13 +769,18 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
       // auto [estimated_direction, poly] = estimate_direction<poly_degree_>(
       // points_in_the_radius, cam_pose.head(2));
 
-      auto estimated_direction{
-          estimate_direction_spline(points_in_the_radius, cam_pose.head(2))};
+      // auto estimated_direction{
+      //     estimate_direction_spline(points_in_the_radius, cam_pose.head(2))};
 
-      if (estimated_direction.has_value()) {
+      auto [estimated_direction, poly_coeffs, hor_dir] =
+          estimate_direction<poly_degree_>(points_in_the_radius,
+                                           cam_pose.head(2));
 
-        if (estimated_direction.value().dot(direction) < 0.0) {
-          estimated_direction.value() *= -1.0;
+      // if (estimated_direction.has_value())
+      {
+
+        if (estimated_direction.dot(direction) < 0.0) {
+          estimated_direction *= -1.0;
         }
 
         // return Eigen::Isometry3d::Identity();
@@ -895,9 +789,9 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
             Eigen::Translation3d{cam_pose.x(), cam_pose.y(), 0.0f} *
             Eigen::AngleAxisd{correction_angle_ * std::numbers::pi / 180.0,
                               Eigen::Vector3d::UnitZ()} *
-            Eigen::AngleAxisd{-std::atan2(estimated_direction.value().x(),
-                                          estimated_direction.value().y()),
-                              Eigen::Vector3d::UnitZ()} *
+            Eigen::AngleAxisd{
+                -std::atan2(estimated_direction.x(), estimated_direction.y()),
+                Eigen::Vector3d::UnitZ()} *
             Eigen::AngleAxisd{-0.5 * std::numbers::pi,
                               Eigen::Vector3d::UnitX()}};
       }
@@ -929,14 +823,24 @@ BagProcessor &BagProcessor::log_ground_truth_landmarks() {
     std::mt19937 gen{};
     std::uniform_int_distribution<uint8_t> distrib{0, 255};
 
+    std::vector<rerun::Color> colors{};
+    std::vector<rerun::LatLon> coords{};
+    std::vector<rerun::components::ClassId> class_ids{};
+
     for (auto &&l : ground_truth_landmarks_) {
       if (not color_map.contains(l.code_)) {
         color_map[l.code_] =
             rerun::Color{distrib(gen), distrib(gen), distrib(gen)};
       }
 
-      log_landmark_map(l, color_map[l.code_]);
+      colors.emplace_back(color_map[l.code_]);
+      coords.emplace_back(l.lla_.x(), l.lla_.y());
+
+      // log_landmark_map(l, color_map[l.code_]);
     }
+
+    rec_->log("map/gt", rerun::GeoPoints{coords}.with_colors(colors).with_radii(
+                            rerun::Radius::ui_points(5.0f)));
   }
 
   return *this;
@@ -966,11 +870,43 @@ BagProcessor::log_landmarks_map(std::span<const Landmark> landmarks) {
 BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
                                              rerun::Color color) {
   if (rec_) {
+
+    const Eigen::Isometry3d landmark_transf{
+        Eigen::Translation3d{landmark.position_} *
+        Eigen::AngleAxisd{-landmark.azimuth_, Eigen::Vector3d::UnitZ()}};
+
+    const std::array<Eigen::Vector3d, 4> arrow{
+        {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {-0.2, 0.7, 0.0}, {0.2, 0.7, 0.0}}};
+
+    const std::vector<rerun::DVec2D> lla_arrow{
+        arrow | transform([&landmark_transf, this](auto &&p) {
+          const Eigen::Vector3d p0{landmark_transf * p};
+
+          double lat{0.0};
+          double lon{0.0};
+          double h{0.0};
+
+          local_converter_->Reverse(p0.x(), p0.y(), p0.z(), lat, lon, h);
+
+          return rerun::DVec2D{lat, lon};
+        }) |
+        to<std::vector>()};
+
+    const std::string entity_path{
+        fmt::format("map/{}_{}", landmark.code_, landmark.id_)};
+
     rec_->log(
-        fmt::format("map/{}_{}", landmark.code_, landmark.id_),
-        rerun::GeoPoints{{rerun::LatLon{landmark.lla_.x(), landmark.lla_.y()}}}
-            .with_colors(color)
-            .with_radii(rerun::Radius::ui_points(5.0f)));
+        entity_path,
+        rerun::GeoLineStrings{{rerun::components::GeoLineString::from_lat_lon(
+                                   {lla_arrow[0], lla_arrow[1]}),
+                               rerun::components::GeoLineString::from_lat_lon(
+                                   {lla_arrow[2], lla_arrow[1], lla_arrow[3]})}}
+            .with_colors(color));
+
+    rec_->log(entity_path, rerun::GeoPoints{{rerun::LatLon{landmark.lla_.x(),
+                                                           landmark.lla_.y()}}}
+                               .with_colors(color)
+                               .with_radii(rerun::Radius::ui_points(5.0f)));
   }
 
   return *this;
@@ -1061,10 +997,10 @@ BagProcessor &BagProcessor::log_camera(int64_t timestamp) {
                     rerun::Mat3x3{r.data()}});
 
       rerun::Mat3x3 rerun_camera{rerun::Mat3x3::IDENTITY};
-      rerun_camera.flat_columns[0] = gtsam_cal3_s2.fx();
-      rerun_camera.flat_columns[4] = gtsam_cal3_s2.fy();
-      rerun_camera.flat_columns[6] = gtsam_cal3_s2.px();
-      rerun_camera.flat_columns[7] = gtsam_cal3_s2.py();
+      rerun_camera.flat_columns[0] = 0.1 * gtsam_cal3_s2.fx();
+      rerun_camera.flat_columns[4] = 0.1 * gtsam_cal3_s2.fy();
+      rerun_camera.flat_columns[6] = 0.1 * gtsam_cal3_s2.px();
+      rerun_camera.flat_columns[7] = 0.1 * gtsam_cal3_s2.py();
 
       rec_->log(
           fmt::format("world/camera_{}/image", timestamp),
@@ -1186,17 +1122,17 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
   return *this;
 }
 
-BagProcessor &BagProcessor::log_track(const std::string_view track_id) {
+BagProcessor &BagProcessor::log_track(size_t track_id) {
 
   if (rec_) {
-    if (image_tracks_.contains(track_id.data())) {
+    if (image_tracks_.contains(track_id)) {
 
       bool first_image{false};
       Eigen::Vector2d prev_pose{Eigen::Vector2d::Zero()};
 
       std::vector<rerun::LatLon> landmark_pos_map{};
 
-      for (auto &&det : image_tracks_.at(track_id.data()).dets_) {
+      for (auto &&det : image_tracks_.at(track_id).dets_) {
 
         cv::Mat_<cv::Vec3b> img = load_image(det.timestamp_);
 
@@ -1204,11 +1140,11 @@ BagProcessor &BagProcessor::log_track(const std::string_view track_id) {
 
           cv::rectangle(img, det.box_, {255.0, 0.0, 0.0}, 5);
 
-          cv::resize(img, img, {img.cols >> 2, img.rows >> 2});
           cv::imwrite(fmt::format("/root/data/images/{}_{}.png", det.timestamp_,
                                   track_id),
                       img);
 
+          cv::resize(img, img, {img.cols >> 2, img.rows >> 2});
           cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
 
           // cv::Mat_<cv::Vec3b> img_undist;
@@ -1239,6 +1175,41 @@ BagProcessor &BagProcessor::log_track(const std::string_view track_id) {
                 continue;
               }
             }
+
+            std::vector<cv::Point2f> points{};
+
+            points.push_back(cv::Point2f{
+                static_cast<float>(det.box_.x + (det.box_.width >> 1)),
+                static_cast<float>(det.box_.y + (det.box_.height >> 1))});
+
+            cv::undistortImagePoints(points, points, camera_matrix_,
+                                     dist_coeffs_);
+
+            const double z0{150.0};
+            const double x{(points[0].x - gtsam_cal3_s2.px()) * z0 /
+                           gtsam_cal3_s2.fx()};
+
+            const double y{(points[0].y - gtsam_cal3_s2.py()) * z0 /
+                           gtsam_cal3_s2.fy()};
+
+            const Eigen::Vector3d p0{cam_pose->translation()};
+            const Eigen::Vector3d p1{(*cam_pose) * Eigen::Vector3d{x, y, z0}};
+
+            rerun::DVec2D lla0{};
+            rerun::DVec2D lla1{};
+            double h{0.0};
+
+            local_converter_->Reverse(p0.x(), p0.y(), p0.z(), lla0.xy[0],
+                                      lla0.xy[1], h);
+            local_converter_->Reverse(p1.x(), p1.y(), p1.z(), lla1.xy[0],
+                                      lla1.xy[1], h);
+
+            rec_->log(fmt::format("map/dir_{}", det.timestamp_),
+                      rerun::GeoLineStrings{
+                          rerun::components::GeoLineString::from_lat_lon(
+                              {lla0, lla1})}
+                          .with_colors(rerun::Color{0xfca40bff})
+                          .with_radii(rerun::Radius::ui_points(0.5f)));
 
             rec_->log(
                 fmt::format("world/camera_{}", det.timestamp_),
@@ -1281,7 +1252,7 @@ BagProcessor &BagProcessor::log_track(const std::string_view track_id) {
         }
       }
 
-      rec_->log(fmt::format("map/track_{}", track_id.data()),
+      rec_->log(fmt::format("map/track_{}", track_id),
                 rerun::GeoPoints{landmark_pos_map}
                     .with_colors(rerun::Color{0, 0, 255})
                     .with_radii(rerun::Radius::ui_points(5.0f)));
@@ -1294,7 +1265,6 @@ BagProcessor &BagProcessor::log_track(const std::string_view track_id) {
 BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
 
   if (rec_) {
-    std::unordered_map<std::string, cv::Scalar> color_map{};
 
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<> distrib{0, 255};
@@ -1307,30 +1277,26 @@ BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
         cv::Mat_<cv::Vec3b> img = load_image(camera_timestamp);
 
         if (not img.empty()) {
+          if (image_detections_.contains(camera_timestamp)) {
+            for (auto &&[det_id, d] :
+                 image_detections_[camera_timestamp].det_id_to_detection_) {
 
-          const auto dets_it{
-              std::find_if(image_detections_.begin(), image_detections_.end(),
-                           [camera_timestamp](auto &&val) {
-                             return camera_timestamp == val.timestamp_;
-                           })};
+              if (not color_map_.contains(d->code_)) {
 
-          if (dets_it != image_detections_.end()) {
-            for (auto &&d : dets_it->dets_) {
-
-              if (not color_map.contains(d.code_)) {
-
-                color_map[d.code_] =
+                color_map_[d->code_] =
                     cv::Scalar{static_cast<double>(distrib(gen)),
                                static_cast<double>(distrib(gen)),
                                static_cast<double>(distrib(gen))};
               }
 
               // cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
-              cv::rectangle(img, d.box_, color_map[d.code_], 5);
-              cv::putText(
-                  img, fmt::format("{} ({:.2f})", d.code_, d.confidence_),
-                  {d.box_.x - 25, d.box_.y - 25}, cv::FONT_HERSHEY_COMPLEX, 1.0,
-                  color_map[d.code_], 2, cv::LINE_AA);
+              cv::rectangle(img, d->box_, color_map_[d->code_], 3);
+              cv::putText(img,
+                          fmt::format("{} {} ({:.2f})", d->class_, d->code_,
+                                      d->confidence_),
+                          {d->box_.x - 25, d->box_.y - 25},
+                          cv::FONT_HERSHEY_COMPLEX, 1.0, color_map_[d->code_],
+                          2, cv::LINE_AA);
             }
           }
 
@@ -1352,7 +1318,7 @@ BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
   return *this;
 }
 
-Landmark BagProcessor::triangulate(std::string track_id) const {
+Landmark BagProcessor::triangulate(size_t track_id) const {
 
   if (image_tracks_.contains(track_id)) {
     auto l{triangulate(image_tracks_.at(track_id))};
@@ -1373,30 +1339,89 @@ std::vector<Landmark>
 BagProcessor::triangulate_tracks(double min_track_length) const {
 
   std::vector<Landmark> res{};
-  int num_processed_tracks{0};
-  int num_skipped_tracks{0};
 
-  for (auto &&[track_id, track] : image_tracks_) {
-    if (track.length_ >= min_track_length) {
-      ++num_processed_tracks;
+  for (auto &&track_id : valid_tracks_) {
 
-      auto l{triangulate(track)};
+    auto l{triangulate(image_tracks_.at(track_id))};
 
-      if (l.has_value()) {
-        res.emplace_back(l.value());
-      } else {
-        LOG(WARNING) << "unable to triangulate track " << track_id;
-      }
+    if (l.has_value()) {
+      res.emplace_back(l.value());
     } else {
-      ++num_skipped_tracks;
-      LOG(WARNING) << "skipping track: " << track.id_
-                   << ", length: " << track.length_;
+      LOG(WARNING) << "unable to triangulate track " << track_id;
     }
   }
 
-  LOG(INFO) << "num processed tracks: " << num_processed_tracks;
   LOG(INFO) << "num triangulated tracks: " << res.size();
-  LOG(INFO) << "num skipped tracks: " << num_skipped_tracks;
+  return res;
+}
+
+float BagProcessor::estimate_azimuth(const Eigen::Isometry3d pose,
+                                     const Eigen::Vector2f p2d) const {
+  const double x{(p2d.x() - gtsam_cal3_s2.px()) / gtsam_cal3_s2.fx()};
+  const double y{(p2d.y() - gtsam_cal3_s2.py()) / gtsam_cal3_s2.fy()};
+
+  const Eigen::Vector3d p0{pose.translation()};
+  const Eigen::Vector3d p1{pose * Eigen::Vector3d{x, y, 1.0}};
+
+  const Eigen::Vector2d dir{(p1 - p0).head<2>().normalized()};
+
+  static constexpr float radians{180.0f / std::numbers::pi_v<float>};
+  const float angle{static_cast<float>(std::atan2(dir.y(), dir.x())) * radians};
+
+  return angle < 0.0f ? 360.0f + angle : angle;
+}
+
+std::vector<size_t> BagProcessor::get_valid_tracks() {
+
+  std::vector<size_t> res;
+  for (auto &&[track_id, track] : image_tracks_) {
+    Eigen::Vector2d prev_camera_pose{Eigen::Vector2d::Zero()};
+    bool first_pose{true};
+
+    float min_angle{360.0f};
+    float max_angle{0.0f};
+
+    for (auto &&d : track.dets_) {
+
+      if (not d.pose_.has_value()) {
+        continue;
+      }
+
+      const auto camera_pos{estimate_camera_pos(d)};
+
+      if (camera_pos.has_value()) {
+
+        std::vector<cv::Point2f> points{};
+        points.push_back(
+            cv::Point2f{static_cast<float>(d.box_.x + (d.box_.width >> 1)),
+                        static_cast<float>(d.box_.y + (d.box_.height >> 1))});
+
+        cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
+
+        const float angle{
+            estimate_azimuth(camera_pos.value(), {points[0].x, points[0].y})};
+
+        min_angle = std::min(min_angle, angle);
+        max_angle = std::max(max_angle, angle);
+
+        d.cam_to_world_ = camera_pos;
+        d.angle_ = angle;
+      }
+    }
+
+    const float delta_angle{max_angle - min_angle > 180.0f
+                                ? 360.0f - (max_angle - min_angle)
+                                : max_angle - min_angle};
+
+    track.delta_angle_ = delta_angle;
+
+    if (delta_angle >= angle_threshold_deg_) {
+      track.valid_ = true;
+      res.push_back(track_id);
+    } else {
+      track.valid_ = false;
+    }
+  }
 
   return res;
 }
@@ -1404,16 +1429,46 @@ BagProcessor::triangulate_tracks(double min_track_length) const {
 std::optional<Landmark>
 BagProcessor::triangulate(const ImageTrack &track) const {
 
+  if (not track.valid_) {
+    return std::nullopt;
+  }
+
+#if 0
   const auto measurement_noise{gtsam::noiseModel::Isotropic::Sigma(2, 1.0)};
   gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> cameras{};
   gtsam::Point2Vector measurements{};
-  std::vector<cv::Point2f> points{};
+  float min_angle{std::numeric_limits<float>::max()};
+  float max_angle{std::numeric_limits<float>::min()};
+#endif
 
-  Eigen::Vector2d prev_camera_pose{Eigen::Vector2d::Zero()};
-  bool first_pose{true};
+  std::optional<Eigen::Vector2d> prev_camera_pose{};
+  std::vector<FeatureTracker::TrackPoint> track_points{};
 
   for (auto &&d : track.dets_) {
 
+    if (not d.cam_to_world_.has_value()) {
+      continue;
+    }
+
+    if (not prev_camera_pose.has_value()) {
+      prev_camera_pose = d.cam_to_world_.value().translation().head<2>();
+    } else {
+
+      const Eigen::Vector2d current_camera_pose{
+          d.cam_to_world_.value().translation().head<2>()};
+
+      if ((current_camera_pose - prev_camera_pose.value()).squaredNorm() >=
+          dist_threshold_squared_) {
+        prev_camera_pose = current_camera_pose;
+      } else {
+        continue;
+      }
+    }
+
+    track_points.emplace_back(track.id_, d.timestamp_, d.box_,
+                              d.cam_to_world_.value(), d.angle_);
+
+#if 0
     if (not d.pose_.has_value()) {
 
       LOG(WARNING) << "detection doesn't have a pose value " << d.timestamp_;
@@ -1440,43 +1495,73 @@ BagProcessor::triangulate(const ImageTrack &track) const {
         }
       }
 
+      std::vector<cv::Point2f> points{};
       points.push_back(
           cv::Point2f{static_cast<float>(d.box_.x + (d.box_.width >> 1)),
                       static_cast<float>(d.box_.y + (d.box_.height >> 1))});
 
+      cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
+
+#if 0
       const gtsam::Pose3 pose{gtsam::Rot3{camera_pos->linear()},
                               gtsam::Vector3{camera_pos->translation()}};
 
+      measurements.emplace_back(points[0].x, points[0].y);
+
       cameras.emplace_back(pose, gtsam_cal3_s2);
+#endif
+
+      const float angle{
+          estimate_azimuth(camera_pos.value(), {points[0].x, points[0].y})};
+
+      min_angle = std::min(min_angle, angle);
+      max_angle = std::max(max_angle, angle);
+
+      track_points.emplace_back(track.id_, d.timestamp_, d.box_,
+                                camera_pos.value(), angle);
+
     } else {
       LOG(WARNING) << "unable to estimate camera transform at " << d.timestamp_;
     }
+
+#endif
   }
 
-  if (points.size() < 5) {
-    LOG(WARNING) << "too little track points: " << points.size()
-                 << ", id: " << track.id_;
+  // if (measurements.size() < 5) {
+  //   LOG(WARNING) << "too little track points: " << measurements.size()
+  //                << ", id: " << track.id_;
+  //   return std::nullopt;
+  // }
+#if 0
+  const float delta_angle{max_angle - min_angle > 180.0f
+                              ? 360.0f - (max_angle - min_angle)
+                              : max_angle - min_angle};
+
+  if (delta_angle < angle_threshold_deg_) {
+    LOG(WARNING) << "trajectory angle is too small: "
+                 << (max_angle - min_angle);
     return std::nullopt;
   }
-
-  cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
-
-  for (auto &&p : points) {
-    measurements.emplace_back(p.x, p.y);
-  }
-
+#endif
   // const Eigen::Vector3d p3d{triangulate_gtsam(cameras, measurements)};
 
   try {
-    Landmark l{};
-    l.position_ = gtsam::triangulatePoint3(cameras, measurements, 1.0e-9, true,
-                                           measurement_noise, true);
+
+    auto landmark{feature_tracker_->triangulate(track_points)};
+
+    if (not landmark.has_value()) {
+      LOG(WARNING) << "unable to triangulate landmark: " << track.id_;
+      return std::nullopt;
+    }
+
+    Landmark l{landmark.value()};
+    correct_orientation(l, gps_);
 
     local_converter_->Reverse(l.position_.x(), l.position_.y(), l.position_.z(),
                               l.lla_.x(), l.lla_.y(), l.lla_.z());
 
-    l.code_ = track.dets_.front().code_;
-    l.id_ = track.dets_.front().id_;
+    l.code_ = track.code_;
+    l.id_ = track.id_;
     return l;
   } catch (std::exception &ex) {
     LOG(ERROR) << ex.what() << "track id: " << track.id_;
@@ -1496,13 +1581,12 @@ BagProcessor::triangulate(const ImageTrack &track) const {
   // }
 }
 
-BagProcessor &
-BagProcessor::log_track_directions(const std::string_view track_id,
-                                   float ray_length) {
+BagProcessor &BagProcessor::log_track_directions(size_t track_id,
+                                                 float ray_length) {
   if (rec_) {
-    if (image_tracks_.contains(track_id.data())) {
+    if (image_tracks_.contains(track_id)) {
 
-      for (auto &&d : image_tracks_.at(track_id.data()).dets_) {
+      for (auto &&d : image_tracks_.at(track_id).dets_) {
         log_direction(track_id, d.timestamp_, ray_length);
       }
     }
@@ -1511,12 +1595,12 @@ BagProcessor::log_track_directions(const std::string_view track_id,
   return *this;
 }
 
-BagProcessor &BagProcessor::log_direction(const std::string_view track_id,
-                                          int64_t timestamp, float ray_length) {
+BagProcessor &BagProcessor::log_direction(size_t track_id, int64_t timestamp,
+                                          float ray_length) {
   if (rec_) {
 
-    if (image_tracks_.contains(track_id.data())) {
-      for (auto &&d : image_tracks_.at(track_id.data()).dets_) {
+    if (image_tracks_.contains(track_id)) {
+      for (auto &&d : image_tracks_.at(track_id).dets_) {
         if (d.timestamp_ == timestamp) {
           auto camera_pos{estimate_camera_pos(d)};
 
@@ -1594,4 +1678,107 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
 
   std::ofstream f{path.data()};
   f << j.dump(4);
+}
+
+void BagProcessor::track_features() {
+  feature_tracker_set_.fast_threshold_ = 20;
+  feature_tracker_set_.gridx_ = feature_tracker_set_.width_ / 8;
+  feature_tracker_set_.gridy_ = feature_tracker_set_.height_ / 8;
+  feature_tracker_set_.num_feats_ =
+      feature_tracker_set_.gridx_ * feature_tracker_set_.gridy_ * 30;
+  feature_tracker_set_.minpxdist_ = 1;
+  feature_tracker_set_.angle_threshold_deg_ = angle_threshold_deg_;
+  feature_tracker_set_.use_klt_ = set_.use_klt_;
+  feature_tracker_set_.save_debug_images_ = false;
+
+  // if (rec_) {
+  //   feature_tracker_set_.rec_ = rec_.get();
+  //   feature_tracker_set_.local_converter_ = local_converter_.get();
+  // }
+
+  feature_tracker_ = std::make_unique<FeatureTracker>(feature_tracker_set_);
+
+  if (not set_.use_klt_) {
+    return;
+  }
+
+  rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image;
+  rclcpp::Serialization<sensor_msgs::msg::NavSatFix> serialization_gps;
+  rosbag2_cpp::Reader reader{};
+
+  reader.open(set_.bag_path_);
+
+  std::vector<ProgressBar::ProgressInfo> topics{};
+
+  for (auto &&topic_info : reader.get_metadata().topics_with_message_count) {
+    if (topic_info.topic_metadata.name == "/camera/image_raw/compressed") {
+      topics.emplace_back(topic_info.message_count, 0,
+                          "/camera/image_raw/compressed", 0);
+      break;
+    }
+  }
+
+  LOG(INFO) << "Tracking features...";
+
+  int num_found{0};
+
+  ProgressBar progress{topics};
+  progress.draw();
+
+  while (reader.has_next()) {
+    auto msg{reader.read_next()};
+    const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
+
+    if (msg->topic_name == "/camera/image_raw/compressed") {
+      sensor_msgs::msg::CompressedImage image_msg;
+      serialization_image.deserialize_message(&serialized_msg, &image_msg);
+
+      const auto timestamp{
+          static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
+          static_cast<int64_t>(image_msg.header.stamp.nanosec) +
+          camera_gps_delta_};
+
+      {
+        cv::Mat_<cv::Vec3b> img =
+            cv::imdecode(image_msg.data, cv::IMREAD_UNCHANGED);
+
+        cv::Mat_<uint8_t> img_grey{};
+        cv::cvtColor(img, img_grey, cv::COLOR_BGR2GRAY);
+
+        if (image_detections_.contains(timestamp)) {
+          feature_tracker_->add(img_grey, image_detections_[timestamp]);
+        } else {
+          feature_tracker_->add(img_grey,
+                                ImageDetections{.timestamp_ = timestamp});
+        }
+
+        progress.advance(msg->topic_name);
+      }
+    }
+  }
+
+  progress.done();
+  LOG(INFO) << "Finalizing...";
+  feature_tracker_->finalize();
+}
+
+void BagProcessor::change_angle(double angle_deg) {
+  for (auto &&track_id : valid_tracks_) {
+    for (auto &&d : image_tracks_.at(track_id).dets_) {
+
+      if (not d.direction_.has_value()) {
+        continue;
+      }
+
+      d.cam_to_world_ = Eigen::Isometry3d{
+          Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
+          Eigen::AngleAxisd{angle_deg * boost::math::double_constants::degree,
+                            Eigen::Vector3d::UnitZ()} *
+          Eigen::AngleAxisd{
+              -std::atan2(d.direction_.value().x(), d.direction_.value().y()),
+              Eigen::Vector3d::UnitZ()} *
+          Eigen::AngleAxisd{-boost::math::double_constants::half_pi,
+                            Eigen::Vector3d::UnitX()}};
+    }
+  }
 }
