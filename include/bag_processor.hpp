@@ -5,12 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <feature_tracker.hpp>
+#include <filesystem>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <memory>
 #include <ng-log/logging.h>
 #include <opencv2/core.hpp>
 #include <optional>
 #include <rerun.hpp>
+#include <serialization.hpp>
 #include <span>
 #include <string>
 #include <string_view>
@@ -26,11 +28,28 @@ struct BagProcessorSettings {
   bool use_klt_;
   bool use_logger_;
   std::shared_ptr<rerun::RecordingStream> rec_;
+
+  template <typename Archive>
+  void serialize(Archive &ar, const unsigned int version) {
+    ar & bag_path_;
+    ar & annotations_path_;
+    ar & calibration_path_;
+    ar & ground_truth_path_;
+    ar & use_klt_;
+    ar & use_logger_;
+  }
 };
 
 class BagProcessor {
 public:
+  BagProcessor() = default;
   BagProcessor(const BagProcessorSettings &set);
+
+  void calculate();
+  void calculate_metrics(std::filesystem::path path,
+                         const std::string_view title = {});
+
+  void optimize_angle(double from, double to, ptrdiff_t num);
 
   BagProcessor &log_gps_path();
   BagProcessor &log_gps_path_map();
@@ -59,6 +78,10 @@ public:
                     const std::string_view path) const;
 
   std::string most_frequent_landmark() const;
+
+  void save(std::filesystem::path path) const;
+
+  [[nodiscard]] static BagProcessor load(std::filesystem::path path);
 
 private:
   void load_calibration(const std::string_view path);
@@ -94,11 +117,43 @@ private:
   std::vector<Landmark> ground_truth_landmarks_;
   std::string most_frequent_landmark_;
   std::unordered_map<std::string, cv::Scalar> color_map_;
-  FeatureTracker::Settings feature_tracker_set_;
+  Eigen::Vector2i camera_resolution_;
+
   std::unique_ptr<FeatureTracker> feature_tracker_;
+  Eigen::Vector3d converter_reference_;
 
   std::vector<size_t> valid_tracks_;
   size_t track_num_;
+  std::vector<Landmark> found_landmarks_;
+
+  friend class boost::serialization::access;
+
+  template <typename Archive>
+  void serialize(Archive &ar, const unsigned int version) {
+    ar & set_;
+    ar & gtsam_cal3_s2;
+    ar & camera_matrix_;
+    ar & dist_coeffs_;
+    ar & image_tracks_;
+    ar & camera_;
+    ar & gps_;
+    ar & ground_truth_landmarks_;
+    ar & most_frequent_landmark_;
+    ar & camera_resolution_;
+    ar & converter_reference_;
+    ar & valid_tracks_;
+    ar & track_num_;
+    ar & found_landmarks_;
+
+    if (Archive::is_loading::value) {
+      local_converter_ = std::make_unique<GeographicLib::LocalCartesian>(
+          converter_reference_.x(), converter_reference_.y(),
+          converter_reference_.z());
+
+      collect_detections();
+      track_features();
+    }
+  }
 
 public:
   static constexpr int poly_degree_{3};
@@ -106,9 +161,9 @@ public:
   // static constexpr int64_t camera_gps_delta_{1'300'000'000l};
   // static constexpr int64_t camera_gps_delta_{-30'000'000};
   static constexpr int64_t camera_gps_delta_{0'000'000};
-  static constexpr double correction_angle_{0.0};
+  static constexpr double correction_angle_{4.0};
   static constexpr double dist_threshold_squared_{0.3 * 0.3};
-  static constexpr float angle_threshold_deg_{23.0f};
+  static constexpr float angle_threshold_deg_{20.0f};
   static constexpr double max_dist_to_track_sqr_{15.0 * 15.0};
   static constexpr double azimuth_correction_threshold_{
       45.0 * boost::math::double_constants::degree};

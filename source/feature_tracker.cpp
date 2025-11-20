@@ -1,7 +1,9 @@
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
+#include <Eigen/Geometry>
+#include <Eigen/src/Core/Array.h>
 #include <Eigen/src/Core/Matrix.h>
-#include <Eigen/src/Core/util/Constants.h>
+#include <Eigen/src/Geometry/Hyperplane.h>
 #include <boost/math/constants/constants.hpp>
 #include <cam/CamRadtan.h>
 #include <cmath>
@@ -33,6 +35,7 @@
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/concat.hpp>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/iota.hpp>
 #include <range/v3/view/linear_distribute.hpp>
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
@@ -45,6 +48,7 @@
 #include <rerun/components/lat_lon.hpp>
 #include <track/TrackBase.h>
 #include <track/TrackKLT.h>
+#include <tuple>
 #include <types.hpp>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,10 +59,59 @@
 using ranges::to;
 using ranges::views::concat;
 using ranges::views::enumerate;
+using ranges::views::ints;
 using ranges::views::linear_distribute;
 using ranges::views::take;
 using ranges::views::transform;
 using ranges::views::zip;
+
+std::vector<double> calculate_distances(
+    gtsam::Point3 p3d,
+    const gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> &cameras,
+    const gtsam::Point2Vector &measurements) {
+
+  const auto lines{zip(cameras, measurements) | transform([](const auto &val) {
+                     const auto &[cam, uv] = val;
+
+                     const auto &calib{cam.calibration()};
+
+                     const gtsam::Point3 p0{cam.pose().translation()};
+                     const gtsam::Point3 p1{
+                         cam.pose() *
+                         gtsam::Point3{(uv.x() - calib.px()) / calib.fx(),
+                                       (uv.y() - calib.py()) / calib.fy(),
+                                       1.0}};
+
+                     return Eigen::Hyperplane<double, 2>::Through(p0.head<2>(),
+                                                                  p1.head<2>());
+                   }) |
+                   to<std::vector>()};
+
+  const auto n{lines.size()};
+
+  std::vector<double> dists{};
+  dists.reserve(n);
+
+  for (auto &&l : lines) {
+    dists.push_back(l.absDistance(p3d.head<2>()));
+  }
+
+  return dists;
+}
+
+double calculate_std_dev(std::span<const double> distances) {
+
+  Eigen::ArrayXd d{};
+  d.resize(distances.size());
+
+  for (auto &&[i, dist] : enumerate(distances)) {
+    d(i) = dist;
+  }
+
+  const auto std_dev{std::sqrt((d - d.mean()).square().sum() /
+                               static_cast<double>(distances.size() - 1))};
+  return std_dev;
+}
 
 struct FeatureTracker::impl {
 
@@ -505,6 +558,7 @@ struct FeatureTracker::impl {
 
     // LOG(INFO) << "rms box ratio: " << rms_box_ratio;
     std::vector<Eigen::Vector3d> p3d{};
+    std::vector<double> total_distances{};
 
     for (auto &&u : linear_distribute(0.0, 1.0, 5)) {
       for (auto &&v : linear_distribute(0.0, 1.0, 5)) {
@@ -540,17 +594,32 @@ struct FeatureTracker::impl {
                            Eigen::aligned_allocator<gtsam::Point2>>>()};
 
         try {
-          p3d.push_back(gtsam::triangulatePoint3(
-              cameras, measurements, 1.0e-9, true, measurement_noise, true));
+
+          const auto triangulated_point{gtsam::triangulatePoint3(
+              cameras, measurements, 1.0e-9, true, measurement_noise, true)};
+
+          const auto distances{
+              calculate_distances(triangulated_point, cameras, measurements)};
+
+          total_distances.insert(total_distances.end(), distances.begin(),
+                                 distances.end());
+
+          p3d.push_back(triangulated_point);
         } catch (...) {
         }
       }
     }
 
     log_points(p3d, {});
+    // log_intersections(total_intersections);
 
     if (p3d.size() >= 3) {
-      return get_azimmuth(p3d, timestamp_to_pose);
+      auto l{get_azimmuth(p3d, timestamp_to_pose)};
+
+      const auto std_dev{calculate_std_dev(total_distances)};
+      l.dist_std_dev_ = std_dev;
+
+      return l;
     }
 
     return std::nullopt;
@@ -610,6 +679,29 @@ struct FeatureTracker::impl {
     }
 
     return Landmark{.position_ = center, .azimuth_ = azimuth};
+  }
+
+  void log_intersections(std::span<const Eigen::Vector2d> points) {
+
+    if (set_.rec_ == nullptr) {
+      return;
+    }
+
+    const std::vector<rerun::components::LatLon> lla_vec{
+        points | transform([this](auto &&p) {
+          double lat{0.0};
+          double lon{0.0};
+          double h{0.0};
+
+          set_.local_converter_->Reverse(p.x(), p.y(), 0.0, lat, lon, h);
+          return rerun::components::LatLon{lat, lon};
+        }) |
+        to<std::vector>()};
+
+    set_.rec_->log("map/intersections",
+                   rerun::GeoPoints::from_lat_lon(lla_vec)
+                       .with_colors(rerun::Color{0, 255, 0})
+                       .with_radii(rerun::Radius::ui_points(4.0f)));
   }
 
   void log_points(std::span<const Eigen::Vector3d> points,

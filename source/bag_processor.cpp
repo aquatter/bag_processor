@@ -1,8 +1,12 @@
+#include "feature_tracker.hpp"
 #include <Eigen/Geometry>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
 #include <array>
+#include <bag_loader.hpp>
 #include <bag_processor.hpp>
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
 #include <boost/math/constants/constants.hpp>
 #include <cmath>
 #include <cstddef>
@@ -60,6 +64,7 @@
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <stdexcept>
 #include <string>
 #include <tracker.h>
 #include <types.hpp>
@@ -79,36 +84,60 @@ using ranges::views::transform;
 using ranges::views::zip;
 
 BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
-
   if (set.use_logger_) {
     rec_ = set_.rec_;
   }
+}
 
-  load_measurements(set.bag_path_);
-  load_calibration(set.calibration_path_);
+void BagProcessor::calculate() {
+
+  load_measurements(set_.bag_path_);
+  load_calibration(set_.calibration_path_);
   load_tracks();
   collect_detections();
   link_detections(image_detections_);
   link_tracks(image_tracks_, image_detections_);
 
-  load_ground_truth_landmarks(set.ground_truth_path_);
-  calculate_most_frequent_landmark();
-
   LOG(INFO) << "num detections: " << image_detections_.size();
   valid_tracks_ = get_valid_tracks();
   LOG(INFO) << "num valid tracks: " << valid_tracks_.size();
-  track_features();
 
-  Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
+  track_features();
+  found_landmarks_ = triangulate_tracks();
+
+  LOG(INFO) << "Num triangulated landmarks: " << found_landmarks_.size();
+
+  combine_landmarks(found_landmarks_, image_tracks_, *local_converter_);
+
+  LOG(INFO) << "Num combined landmarks: " << found_landmarks_.size();
+}
+
+void BagProcessor::calculate_metrics(std::filesystem::path path,
+                                     const std::string_view title) {
+  load_ground_truth_landmarks(set_.ground_truth_path_);
+  calculate_most_frequent_landmark();
+
+  const Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
+  auto res{metrics.eval(found_landmarks_)};
+
+  res.save(path.string(), title);
+}
+
+void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
 
   float max_auc{0.0f};
   Metrics::Result best_result{};
   float best_angle{0.0f};
   std::vector<Landmark> best_landmarks{};
 
-  for (auto &&angle : linear_distribute(-10.0, 10.0, 21)) {
+  const Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
+
+  for (auto &&angle : linear_distribute(from, to, num)) {
     change_angle(angle);
+
     auto found_landmarks{triangulate_tracks()};
+    combine_landmarks(found_landmarks, image_tracks_, *local_converter_);
+
     auto res{metrics.eval(found_landmarks)};
 
     if (max_auc < res.auc_) {
@@ -119,7 +148,10 @@ BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
     }
   }
 
-  best_result.save("/root/data/domodedovo_gopro13.json", "Domodedovo GoPro13");
+  LOG(INFO) << "Best angle: " << best_angle;
+  LOG(INFO) << "Best auc: " << max_auc;
+
+  found_landmarks_ = std::move(best_landmarks);
 }
 
 void BagProcessor::collect_detections() {
@@ -159,6 +191,7 @@ void BagProcessor::calculate_most_frequent_landmark() {
     }
   }
 
+  LOG(INFO) << "Num ground-truth landmarks: " << ground_truth_landmarks_.size();
   LOG(INFO) << "most frequent landmark: " << most_frequent_landmark_;
 }
 
@@ -169,8 +202,8 @@ void BagProcessor::load_calibration(const std::string_view path) {
   const auto distortion{
       calib["cam0"]["distortion_coeffs"].as<std::vector<double>>()};
 
-  feature_tracker_set_.width_ = calib["cam0"]["resolution"][0].as<int>();
-  feature_tracker_set_.height_ = calib["cam0"]["resolution"][1].as<int>();
+  camera_resolution_.x() = calib["cam0"]["resolution"][0].as<int>();
+  camera_resolution_.y() = calib["cam0"]["resolution"][1].as<int>();
 
   camera_matrix_ = cv::Mat_<double>::eye(3, 3);
   camera_matrix_(0, 0) = intrinsics[0];
@@ -182,9 +215,6 @@ void BagProcessor::load_calibration(const std::string_view path) {
 
   gtsam_cal3_s2 = gtsam::Cal3_S2{intrinsics[0], intrinsics[1], 0.0,
                                  intrinsics[2], intrinsics[3]};
-
-  ranges::copy(intrinsics, feature_tracker_set_.intrinsics_.begin());
-  ranges::copy(distortion, feature_tracker_set_.distortion_.begin());
 }
 
 void BagProcessor::load_detections(const std::string_view path) {
@@ -323,11 +353,16 @@ void BagProcessor::load_tracks() {
         det.center_undistorted_ = points.front();
 
         track.dets_.emplace_back(det);
-        track.stamp_to_detection_[det.timestamp_] = &track.dets_.back();
+        // track.stamp_to_detection_[det.timestamp_] = &track.dets_.back();
         ++detection_id;
       }
 
       image_tracks_[track_id] = std::move(track);
+
+      for (auto &&d : image_tracks_.at(track_id).dets_) {
+        image_tracks_.at(track_id).stamp_to_detection_[d.timestamp_] = &d;
+      }
+
       ++track_id;
     }
   }
@@ -576,6 +611,9 @@ void BagProcessor::load_measurements(const std::string_view path) {
                            static_cast<int64_t>(gps_msg.header.stamp.nanosec)};
 
       if (not local_converter_) {
+        converter_reference_ = {gps_msg.latitude, gps_msg.longitude,
+                                gps_msg.altitude};
+
         local_converter_ = std::make_unique<GeographicLib::LocalCartesian>(
             gps_msg.latitude, gps_msg.longitude, gps_msg.altitude);
 
@@ -676,6 +714,7 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
   rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image;
   rosbag2_cpp::Reader reader{};
   reader.open(set_.bag_path_);
+  reader.seek(timestamp - camera_gps_delta_);
 
   while (reader.has_next()) {
     auto msg{reader.read_next()};
@@ -1681,22 +1720,32 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
 }
 
 void BagProcessor::track_features() {
-  feature_tracker_set_.fast_threshold_ = 20;
-  feature_tracker_set_.gridx_ = feature_tracker_set_.width_ / 8;
-  feature_tracker_set_.gridy_ = feature_tracker_set_.height_ / 8;
-  feature_tracker_set_.num_feats_ =
-      feature_tracker_set_.gridx_ * feature_tracker_set_.gridy_ * 30;
-  feature_tracker_set_.minpxdist_ = 1;
-  feature_tracker_set_.angle_threshold_deg_ = angle_threshold_deg_;
-  feature_tracker_set_.use_klt_ = set_.use_klt_;
-  feature_tracker_set_.save_debug_images_ = false;
 
-  // if (rec_) {
-  //   feature_tracker_set_.rec_ = rec_.get();
-  //   feature_tracker_set_.local_converter_ = local_converter_.get();
-  // }
+  FeatureTracker::Settings feature_tracker_set{};
 
-  feature_tracker_ = std::make_unique<FeatureTracker>(feature_tracker_set_);
+  feature_tracker_set.intrinsics_ = {camera_matrix_(0, 0), camera_matrix_(1, 1),
+                                     camera_matrix_(0, 2),
+                                     camera_matrix_(1, 2)};
+
+  feature_tracker_set.distortion_ = {dist_coeffs_(0), dist_coeffs_(1),
+                                     dist_coeffs_(2), dist_coeffs_(3)};
+
+  feature_tracker_set.fast_threshold_ = 20;
+  feature_tracker_set.gridx_ = feature_tracker_set.width_ / 8;
+  feature_tracker_set.gridy_ = feature_tracker_set.height_ / 8;
+  feature_tracker_set.num_feats_ =
+      feature_tracker_set.gridx_ * feature_tracker_set.gridy_ * 30;
+  feature_tracker_set.minpxdist_ = 1;
+  feature_tracker_set.angle_threshold_deg_ = angle_threshold_deg_;
+  feature_tracker_set.use_klt_ = set_.use_klt_;
+  feature_tracker_set.save_debug_images_ = false;
+
+  if (rec_) {
+    feature_tracker_set.rec_ = rec_.get();
+    feature_tracker_set.local_converter_ = local_converter_.get();
+  }
+
+  feature_tracker_ = std::make_unique<FeatureTracker>(feature_tracker_set);
 
   if (not set_.use_klt_) {
     return;
@@ -1781,4 +1830,30 @@ void BagProcessor::change_angle(double angle_deg) {
                             Eigen::Vector3d::UnitX()}};
     }
   }
+}
+
+void BagProcessor::save(std::filesystem::path path) const {
+  std::ofstream f{path, std::ios_base::binary};
+
+  if (f.is_open() and f.good()) {
+    boost::archive::binary_oarchive oa{f};
+    oa << *this;
+    return;
+  }
+
+  throw std::runtime_error{"unable to store object"};
+}
+
+BagProcessor BagProcessor::load(std::filesystem::path path) {
+  BagProcessor obj{};
+  std::ifstream f{path, std::ios_base::binary};
+
+  if (f.is_open() and f.good()) {
+    boost::archive::binary_iarchive ia{f};
+    ia >> obj;
+    return obj;
+  }
+
+  throw std::runtime_error{"unable to load object"};
+  return {};
 }

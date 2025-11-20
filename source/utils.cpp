@@ -3,6 +3,7 @@
 #include <boost/math/constants/constants.hpp>
 #include <cmath>
 #include <cstddef>
+#include <deque>
 #include <flann/algorithms/dist.h>
 #include <flann/flann.hpp>
 #include <flann/util/matrix.h>
@@ -31,6 +32,7 @@
 #include <rerun.hpp>
 #include <span>
 #include <types.hpp>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <utils.hpp>
@@ -362,7 +364,7 @@ void link_tracks(ImageTrack::map_type &tracks,
         track.link(tracks.at(other_track_id));
       }
 
-      processed_tracks.insert(std::pair{track_id, other_track_id});
+      processed_tracks.insert(std::pair{other_track_id, track_id});
     }
   }
 }
@@ -523,6 +525,7 @@ bool Metrics::Result::save(const std::string_view path,
     j["title"] = title.data();
   }
 
+  j["auc"] = auc_;
   j["precision"] = precision_;
   j["recall"] = recall_;
   j["distances"] = distances_;
@@ -535,4 +538,93 @@ bool Metrics::Result::save(const std::string_view path,
   }
 
   return false;
+}
+
+void combine_landmarks(std::vector<Landmark> &landmarks,
+                       const ImageTrack::map_type &tracks,
+                       const GeographicLib::LocalCartesian &converter) {
+
+  std::unordered_map<size_t, Landmark *> id_to_landmark{};
+
+  for (auto &&landmark : landmarks) {
+    id_to_landmark[landmark.id_] = &landmark;
+  }
+
+  std::vector<Landmark> added_landmarks{};
+  std::unordered_set<size_t> processed_landmarks{};
+
+  for (auto &&landmark : landmarks) {
+
+    if (processed_landmarks.contains(landmark.id_)) {
+      continue;
+    }
+
+    std::deque<size_t> q{};
+    q.push_back(landmark.id_);
+    processed_landmarks.insert(landmark.id_);
+
+    std::unordered_set<size_t> existing_landmarks{};
+    std::unordered_set<size_t> landmarks_to_add{};
+
+    existing_landmarks.insert(landmark.id_);
+
+    while (not q.empty()) {
+      const auto id{q.front()};
+      q.pop_front();
+
+      if (not id_to_landmark.contains(id)) {
+        landmarks_to_add.insert(id);
+      } else {
+        existing_landmarks.insert(id);
+      }
+
+      for (auto &&linked_id : tracks.at(id).linked_tracks_) {
+
+        if (processed_landmarks.contains(linked_id)) {
+          continue;
+        }
+
+        q.push_back(linked_id);
+        processed_landmarks.insert(linked_id);
+      }
+    }
+
+    Eigen::Vector3d mean_position{Eigen::Vector3d::Zero()};
+    double mean_azimuth{0.0};
+    double norm{0.0};
+
+    for (auto &&id : existing_landmarks) {
+      const auto std_dev{id_to_landmark[id]->dist_std_dev_};
+      mean_position += id_to_landmark[id]->position_ / std_dev;
+      mean_azimuth += id_to_landmark[id]->azimuth_ / std_dev;
+      norm += 1.0 / std_dev;
+    }
+
+    mean_position /= norm;
+    mean_azimuth /= norm;
+
+    Eigen::Vector3d mean_lla{};
+
+    converter.Reverse(mean_position.x(), mean_position.y(), mean_position.z(),
+                      mean_lla.x(), mean_lla.y(), mean_lla.z());
+
+    for (auto &&id : existing_landmarks) {
+      id_to_landmark[id]->position_ = mean_position;
+      id_to_landmark[id]->lla_ = mean_lla;
+      id_to_landmark[id]->azimuth_ = mean_azimuth;
+    }
+
+    for (auto &&id : landmarks_to_add) {
+      const auto &track{tracks.at(id)};
+      added_landmarks.emplace_back(Landmark{.id_ = track.id_,
+                                            .code_ = track.code_,
+                                            .position_ = mean_position,
+                                            .lla_ = mean_lla,
+                                            .azimuth_ = mean_azimuth,
+                                            .dist_std_dev_ = 0.0});
+    }
+  }
+
+  landmarks.insert(landmarks.end(), added_landmarks.begin(),
+                   added_landmarks.end());
 }

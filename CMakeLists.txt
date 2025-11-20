@@ -43,6 +43,7 @@ add_executable(${PROJECT_NAME}
     source/feature_tracker.cpp
     source/utils.cpp
     source/types.cpp
+    source/bag_loader.cpp
     ${ALGLIB_SOURCES}
 )
 

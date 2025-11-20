@@ -1,18 +1,20 @@
 #include <bag_processor.hpp>
-#include <chrono>
-#include <cstdint>
 #include <cstdlib>
 #include <fmt/color.h>
 #include <fmt/format.h>
+#include <fstream>
+#include <ios>
 #include <memory>
 #include <opencv2/core/matx.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <optional>
 #include <rclcpp/node.hpp>
 #include <rclcpp/publisher.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/utilities.hpp>
 #include <rerun.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <serialization.hpp>
 
 void LogFormatter(std::ostream &s, const nglog::LogMessage &m, void *) {
 
@@ -40,17 +42,34 @@ void LogFormatter(std::ostream &s, const nglog::LogMessage &m, void *) {
                    m.basename(), m.line());
 }
 
+struct My_Struct {
+
+  std::optional<Eigen::Vector3d> vec_;
+
+  template <typename Archive>
+  void serialize(Archive &ar, const unsigned int version) {
+    ar & vec_;
+  }
+};
+
 int main(const int argc, const char *const *argv) {
 
   nglog::InitializeLogging(argv[0]);
   nglog::InstallPrefixFormatter(&LogFormatter);
   FLAGS_stderrthreshold = 0;
 
-  auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
-  rec->connect_grpc().exit_on_failure();
-
   constexpr static std::string_view file_name{"GX010004"};
   constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
+
+  {
+    auto bag_proc{BagProcessor::load(
+        fmt::format("/root/data/{}/archive.bin", folder_name))};
+
+    bag_proc.calculate_metrics("");
+  }
+
+  auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
+  rec->connect_grpc().exit_on_failure();
 
   try {
     BagProcessor bag_proc{
@@ -73,16 +92,19 @@ int main(const int argc, const char *const *argv) {
 
     LOG(INFO) << "Bag processor initialized";
 
-    const int64_t from_timestamp{1755767829610259789 - 2 * 1'000'000'000l};
-    const int64_t to_timestamp{from_timestamp + 2 * 1'000'000'000l};
+    bag_proc.calculate();
+    bag_proc.save(fmt::format("/root/data/{}/archive.bin", folder_name));
 
-    const auto found_landmarks{bag_proc.triangulate_tracks()};
+    // const int64_t from_timestamp{1755767829610259789 - 2 * 1'000'000'000l};
+    // const int64_t to_timestamp{from_timestamp + 2 * 1'000'000'000l};
 
-    bag_proc.log_gps_path_map()
-        .log_landmarks_map(found_landmarks)
-        .save_geojson(found_landmarks,
-                      fmt::format("/root/data/{}/{}.geojson",
-                                  folder_name.data(), file_name.data()));
+    // const auto found_landmarks{bag_proc.triangulate_tracks()};
+
+    // bag_proc.log_gps_path_map();
+    // .log_landmarks_map(found_landmarks)
+    // .save_geojson(found_landmarks,
+    //               fmt::format("/root/data/{}/{}.geojson",
+    //                           folder_name.data(), file_name.data()));
 
     // .log_track(338);
     // .log_landmarks_map(found_landmarks);

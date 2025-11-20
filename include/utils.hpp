@@ -1,5 +1,6 @@
 #pragma once
 
+#include <GeographicLib/LocalCartesian.hpp>
 #include <cstddef>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/geometry/CameraSet.h>
@@ -37,6 +38,10 @@ void link_detections(ImageDetections::map_type &detections);
 
 void link_tracks(ImageTrack::map_type &tracks,
                  ImageDetections::map_type &detections);
+
+void combine_landmarks(std::vector<Landmark> &landmarks,
+                       const ImageTrack::map_type &tracks,
+                       const GeographicLib::LocalCartesian &converter);
 
 template <int degree>
 std::tuple<Eigen::Vector2d, std::array<double, degree + 1>, bool>

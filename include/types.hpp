@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <opencv2/core.hpp>
-#include <opencv2/core/types.hpp>
 #include <optional>
+#include <serialization.hpp>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,6 +33,25 @@ struct Detection {
 
   [[nodiscard]] bool should_be_linked(const Detection &d) const;
   void link(Detection &d);
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & det_id_;
+    ar & track_id_;
+    ar & timestamp_;
+    ar & class_;
+    ar & code_;
+    ar & confidence_;
+    ar & box_;
+    ar & center_;
+    ar & center_undistorted_;
+    ar & pose_;
+    ar & cam_to_world_;
+    ar & angle_;
+    ar & gps_ind_;
+    ar & direction_;
+    ar & linked_detections_;
+    ar & cumulative_length_;
+  }
 };
 
 struct ImageDetections {
@@ -60,17 +79,44 @@ struct ImageTrack {
 
   [[nodiscard]] bool should_be_linked(const ImageTrack &track) const;
   void link(ImageTrack &d);
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & id_;
+    ar & code_;
+    ar & dets_;
+    ar & delta_angle_;
+    ar & valid_;
+    ar & length_;
+    ar & linked_tracks_;
+
+    if (Archive::is_loading::value) {
+      for (auto &&d : dets_) {
+        stamp_to_detection_[d.timestamp_] = &d;
+      }
+    }
+  }
 };
 
 struct GpsMeasurement {
   int64_t timestamp_;
   Eigen::Vector3d position_;
   Eigen::Vector3d lla_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & timestamp_;
+    ar & position_;
+    ar & lla_;
+  }
 };
 
 struct CameraMeasurement {
   int64_t timestamp_;
   uint64_t id_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & timestamp_;
+    ar & id_;
+  }
 };
 
 struct Landmark {
@@ -79,4 +125,14 @@ struct Landmark {
   Eigen::Vector3d position_;
   Eigen::Vector3d lla_;
   double azimuth_;
+  double dist_std_dev_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & id_;
+    ar & code_;
+    ar & position_;
+    ar & lla_;
+    ar & azimuth_;
+    ar & dist_std_dev_;
+  }
 };
