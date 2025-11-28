@@ -1,6 +1,6 @@
 #pragma once
 
-#include <GeographicLib/LocalCartesian.hpp>
+#include <cartesian_converter.hpp>
 #include <cstddef>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/geometry/CameraSet.h>
@@ -41,12 +41,18 @@ void link_tracks(ImageTrack::map_type &tracks,
 
 void combine_landmarks(std::vector<Landmark> &landmarks,
                        const ImageTrack::map_type &tracks,
-                       const GeographicLib::LocalCartesian &converter);
+                       const CartesianConverter &converter);
+
+template <int degree> struct PolyResult {
+  Eigen::Vector2d point_;
+  Eigen::Vector2d direction_;
+  std::array<double, degree + 1> poly_;
+  bool horizontal_;
+};
 
 template <int degree>
-std::tuple<Eigen::Vector2d, std::array<double, degree + 1>, bool>
-estimate_direction(std::span<const Eigen::Vector2d> points,
-                   Eigen::Vector2d query_point) {
+PolyResult<degree> estimate_direction(std::span<const Eigen::Vector2d> points,
+                                      Eigen::Vector2d query_point) {
 
   using ranges::views::enumerate;
   using ranges::views::ints;
@@ -113,7 +119,19 @@ estimate_direction(std::span<const Eigen::Vector2d> points,
       x_val *= query_point.x();
     }
 
-    return {Eigen::Vector2d{1.0, y_prime}.normalized(), poly, horizontal_dir};
+    double y{0.0};
+    x_val = 1.0;
+
+    for (auto &&i : ints(0, degree + 1)) {
+      y += p(i) * x_val;
+      x_val *= query_point.x();
+    }
+
+    return PolyResult<degree>{.point_ = Eigen::Vector2d{query_point.x(), y},
+                              .direction_ =
+                                  Eigen::Vector2d{1.0, y_prime}.normalized(),
+                              .poly_ = poly,
+                              .horizontal_ = horizontal_dir};
   }
 
   double x_prime{0.0};
@@ -124,7 +142,19 @@ estimate_direction(std::span<const Eigen::Vector2d> points,
     y_val *= query_point.y();
   }
 
-  return {Eigen::Vector2d{x_prime, 1.0}.normalized(), poly, horizontal_dir};
+  double x{0.0};
+  y_val = 1.0;
+
+  for (auto &&i : ints(0, degree + 1)) {
+    x += p(i) * y_val;
+    y_val *= query_point.y();
+  }
+
+  return PolyResult<degree>{.point_ = Eigen::Vector2d{x, query_point.y()},
+                            .direction_ =
+                                Eigen::Vector2d{x_prime, 1.0}.normalized(),
+                            .poly_ = poly,
+                            .horizontal_ = horizontal_dir};
 }
 
 class Metrics {

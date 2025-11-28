@@ -1,12 +1,16 @@
+#include "bag_loader.hpp"
+#include <Eigen/Core>
+
 #include <bag_processor.hpp>
 #include <cstdlib>
 #include <fmt/color.h>
 #include <fmt/format.h>
 #include <fstream>
-#include <ios>
+#include <iostream>
 #include <memory>
 #include <opencv2/core/matx.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <optional>
 #include <rclcpp/node.hpp>
 #include <rclcpp/publisher.hpp>
@@ -15,6 +19,7 @@
 #include <rerun.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <serialization.hpp>
+#include <tracks_collecton.hpp>
 
 void LogFormatter(std::ostream &s, const nglog::LogMessage &m, void *) {
 
@@ -42,43 +47,74 @@ void LogFormatter(std::ostream &s, const nglog::LogMessage &m, void *) {
                    m.basename(), m.line());
 }
 
-struct My_Struct {
-
-  std::optional<Eigen::Vector3d> vec_;
-
-  template <typename Archive>
-  void serialize(Archive &ar, const unsigned int version) {
-    ar & vec_;
-  }
-};
-
 int main(const int argc, const char *const *argv) {
 
   nglog::InitializeLogging(argv[0]);
   nglog::InstallPrefixFormatter(&LogFormatter);
   FLAGS_stderrthreshold = 0;
 
-  constexpr static std::string_view file_name{"GX010004"};
-  constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
-
-  {
-    auto bag_proc{BagProcessor::load(
-        fmt::format("/root/data/{}/archive.bin", folder_name))};
-
-    bag_proc.calculate_metrics("");
-  }
+  constexpr static std::string_view file_name{"video20250831-125017"};
+  constexpr static std::string_view folder_name{"domodedovo/video_domodedovo"};
 
   auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
   rec->connect_grpc().exit_on_failure();
 
   try {
+#if 1
+    {
+
+      auto bag_proc1{
+          BagProcessor::load("/root/data/domodedovo/gopro_01_11/archive.bin")};
+
+      auto bag_proc2{BagProcessor::load(
+          "/root/data/domodedovo/video_domodedovo/archive.bin")};
+
+#if 0
+      BagLoader loader1{BagLoader::Settings{
+          .compressed_image_topic_ = "/camera/image_raw/compressed",
+          .path_to_bag_ = bag_proc1.settings().bag_path_,
+          .rec_ = rec}};
+
+
+      BagLoader loader2{BagLoader::Settings{
+          .compressed_image_topic_ = "/camera/image_raw/compressed",
+          .path_to_bag_ = bag_proc2.settings().bag_path_,
+          .rec_ = rec}};
+
+      const auto det1{bag_proc1.get_tracks().at(205).dets_[103]};
+      const auto det2{bag_proc2.get_tracks().at(214).dets_[0]};
+
+      auto img1 = loader1.load_image(det1.timestamp_ -
+                                     bag_proc1.settings().camera_gps_delta_);
+
+      auto img2 = loader2.load_image(det2.timestamp_ -
+                                     bag_proc2.settings().camera_gps_delta_);
+
+      cv::rectangle(img1, det1.box_, {0.0, 255.0, 0.0}, 2);
+      cv::rectangle(img2, det2.box_, {0.0, 255.0, 0.0}, 2);
+
+      cv::imwrite("/root/data/images/image3.png", img1);
+      cv::imwrite("/root/data/images/image4.png", img2);
+#endif
+
+      TracksCollection track_collection{};
+      track_collection.set_rerun(rec);
+      track_collection.merge(bag_proc1);
+      track_collection.merge(bag_proc2);
+
+      return EXIT_SUCCESS;
+    }
+#endif
+
     BagProcessor bag_proc{
         {.bag_path_ = fmt::format("/root/data/{}/{}", folder_name.data(),
                                   file_name.data()),
          .annotations_path_ = fmt::format("/root/data/{}/detections_{}.json",
                                           folder_name.data(), file_name.data()),
-         .calibration_path_ =
-             "/root/data/domodedovo/gopro_01_11/GX010005-camchain.yaml",
+         //  .calibration_path_ =
+         //      "/root/data/calibration_gopro13_05_11/GX010005-camchain.yaml",
+         .calibration_path_ = "/root/data/domodedovo/video_domodedovo/calib/"
+                              "VID_20250929_134020-camchain.yaml",
          //  "/root/data/calibration_gopro_15_10/results/"
          // "wide_stab_on-camchain.yaml",
          //  "/root/data/calib_bmi160_1204x768_29_09/"
@@ -86,13 +122,21 @@ int main(const int argc, const char *const *argv) {
          //  "/root/data/calibration_20_08/imu_camera_20_08-camchain.yaml",
          .ground_truth_path_ =
              fmt::format("/root/data/{}/gt.geojson", folder_name.data()),
+         //  .correction_angle_ = 4.0,
+         .correction_angle_ = 0.0,
+         .camera_gps_delta_ = 1'300'000'000l,
+         //  .camera_gps_delta_ = 0l,
          .use_klt_ = false,
          .use_logger_ = true,
-         .rec_ = rec}};
+         //  .session_name_ = "gopro_01_11"
+         .session_name_ = "video_gps"}};
 
     LOG(INFO) << "Bag processor initialized";
 
     bag_proc.calculate();
+    bag_proc.calculate_metrics(
+        fmt::format("/root/data/{}/prec_recall.json", folder_name));
+
     bag_proc.save(fmt::format("/root/data/{}/archive.bin", folder_name));
 
     // const int64_t from_timestamp{1755767829610259789 - 2 * 1'000'000'000l};

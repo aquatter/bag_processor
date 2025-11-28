@@ -1,4 +1,3 @@
-#include "feature_tracker.hpp"
 #include <Eigen/Geometry>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
@@ -13,6 +12,7 @@
 #include <cstdint>
 #include <csv_parser.hpp>
 #include <exception>
+#include <feature_tracker.hpp>
 #include <filesystem>
 #include <fmt/color.h>
 #include <fmt/core.h>
@@ -67,6 +67,7 @@
 #include <stdexcept>
 #include <string>
 #include <tracker.h>
+#include <triangulation.hpp>
 #include <types.hpp>
 #include <unordered_map>
 #include <utils.hpp>
@@ -83,16 +84,16 @@ using ranges::views::take;
 using ranges::views::transform;
 using ranges::views::zip;
 
-BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
-  if (set.use_logger_) {
-    rec_ = set_.rec_;
-  }
-}
+BagProcessor::BagProcessor() = default;
+
+BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {}
 
 void BagProcessor::calculate() {
 
   load_measurements(set_.bag_path_);
   load_calibration(set_.calibration_path_);
+  calib_.print();
+
   load_tracks();
   collect_detections();
   link_detections(image_detections_);
@@ -102,25 +103,23 @@ void BagProcessor::calculate() {
   valid_tracks_ = get_valid_tracks();
   LOG(INFO) << "num valid tracks: " << valid_tracks_.size();
 
-  track_features();
   found_landmarks_ = triangulate_tracks();
 
   LOG(INFO) << "Num triangulated landmarks: " << found_landmarks_.size();
 
-  combine_landmarks(found_landmarks_, image_tracks_, *local_converter_);
+  combine_landmarks(found_landmarks_, image_tracks_, local_converter_);
 
   LOG(INFO) << "Num combined landmarks: " << found_landmarks_.size();
 }
 
-void BagProcessor::calculate_metrics(std::filesystem::path path,
-                                     const std::string_view title) {
+void BagProcessor::calculate_metrics(std::filesystem::path path) {
   load_ground_truth_landmarks(set_.ground_truth_path_);
   calculate_most_frequent_landmark();
 
   const Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
   auto res{metrics.eval(found_landmarks_)};
 
-  res.save(path.string(), title);
+  res.save(path.string(), set_.session_name_);
 }
 
 void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
@@ -136,7 +135,7 @@ void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
     change_angle(angle);
 
     auto found_landmarks{triangulate_tracks()};
-    combine_landmarks(found_landmarks, image_tracks_, *local_converter_);
+    combine_landmarks(found_landmarks, image_tracks_, local_converter_);
 
     auto res{metrics.eval(found_landmarks)};
 
@@ -202,19 +201,19 @@ void BagProcessor::load_calibration(const std::string_view path) {
   const auto distortion{
       calib["cam0"]["distortion_coeffs"].as<std::vector<double>>()};
 
-  camera_resolution_.x() = calib["cam0"]["resolution"][0].as<int>();
-  camera_resolution_.y() = calib["cam0"]["resolution"][1].as<int>();
+  calib_.camera_resolution_.x() = calib["cam0"]["resolution"][0].as<int>();
+  calib_.camera_resolution_.y() = calib["cam0"]["resolution"][1].as<int>();
 
-  camera_matrix_ = cv::Mat_<double>::eye(3, 3);
-  camera_matrix_(0, 0) = intrinsics[0];
-  camera_matrix_(1, 1) = intrinsics[1];
-  camera_matrix_(0, 2) = intrinsics[2];
-  camera_matrix_(1, 2) = intrinsics[3];
+  calib_.camera_matrix_ = cv::Mat_<double>::eye(3, 3);
+  calib_.camera_matrix_(0, 0) = intrinsics[0];
+  calib_.camera_matrix_(1, 1) = intrinsics[1];
+  calib_.camera_matrix_(0, 2) = intrinsics[2];
+  calib_.camera_matrix_(1, 2) = intrinsics[3];
 
-  dist_coeffs_ = cv::Mat_<double>(distortion, true);
+  calib_.dist_coeffs_ = cv::Mat_<double>(distortion, true);
 
-  gtsam_cal3_s2 = gtsam::Cal3_S2{intrinsics[0], intrinsics[1], 0.0,
-                                 intrinsics[2], intrinsics[3]};
+  calib_.cal3_s2_ = gtsam::Cal3_S2{intrinsics[0], intrinsics[1], 0.0,
+                                   intrinsics[2], intrinsics[3]};
 }
 
 void BagProcessor::load_detections(const std::string_view path) {
@@ -325,15 +324,18 @@ void BagProcessor::load_tracks() {
       const auto num_dets{json_track["occurrences"].size()};
 
       ImageTrack track{};
+      track.name_ = set_.session_name_;
       track.id_ = track_id;
       track.code_ = sign_code;
       track.length_ = 0.0;
+      track.calib_ = calib_;
+      track.geodetic_origin_ = local_converter_.origin();
 
       for (auto &&json_det : json_track["occurrences"]) {
 
         Detection det{};
         det.timestamp_ =
-            json_det["timestamp"].get<int64_t>() + camera_gps_delta_;
+            json_det["timestamp"].get<int64_t>() + set_.camera_gps_delta_;
         det.box_.x = json_det["bbox"][0].get<int>();
         det.box_.y = json_det["bbox"][1].get<int>();
         det.box_.width = json_det["bbox"][2].get<int>() - det.box_.x + 1;
@@ -345,15 +347,9 @@ void BagProcessor::load_tracks() {
         det.det_id_ = detection_id;
         det.track_id_ = track_id;
         det.cumulative_length_ = 0.0;
-
-        std::vector<cv::Point2f> points{};
-        points.push_back(cv::Point2f{det.center_});
-        cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
-
-        det.center_undistorted_ = points.front();
+        det.center_undistorted_ = calib_.undistort_point(det.center_);
 
         track.dets_.emplace_back(det);
-        // track.stamp_to_detection_[det.timestamp_] = &track.dets_.back();
         ++detection_id;
       }
 
@@ -416,165 +412,6 @@ void BagProcessor::load_tracks() {
   LOG(INFO) << "num loaded tracks: " << image_tracks_.size();
 }
 
-void BagProcessor::create_tracks() {
-#if 0
-  // image_detections_ = parse_csv(path);
-
-  std::unordered_map<std::string, Tracker> trackers;
-
-  std::vector<cv::Rect> boxes;
-
-  for (auto &&camera_meausurement : camera_) {
-
-    const auto camera_timestamp{camera_meausurement.timestamp_};
-
-    const auto dets_it{std::find_if(image_detections_.begin(),
-                                    image_detections_.end(),
-                                    [camera_timestamp](auto &&val) {
-                                      return camera_timestamp == val.timestamp_;
-                                    })};
-
-    std::unordered_map<std::string, std::vector<cv::Rect>> det_map;
-
-    if (dets_it != image_detections_.end()) {
-
-      for (auto &&d : dets_it->dets_) {
-
-        if (d.code_ == "UNK" or d.class_ == "UNLINK_CLASS") {
-          continue;
-        }
-
-        det_map[d.code_].push_back(d.box_);
-
-        if (not trackers.contains(d.code_)) {
-          trackers[d.code_] = {};
-        }
-      }
-    }
-
-    for (auto &&[code, tracker] : trackers) {
-
-      const auto &current_dets{det_map[code]};
-
-      tracker.Run(current_dets);
-      const auto tracks{tracker.GetTracks()};
-
-      for (auto &&[id, track] : tracks) {
-
-        // if (code == "5.19.1" and id == 71) {
-        //   cv::Mat_<cv::Vec3b> img = load_image(camera_timestamp);
-
-        //   for (auto &&d : current_dets) {
-        //     cv::rectangle(img, d, {255.0, 0.0, 0.0}, 3);
-        //     cv::rectangle(img, track.GetStateAsBbox(), {0.0, 255.0, 0.0}, 3);
-        //   }
-
-        //   cv::imwrite(
-        //       fmt::format("/root/data/images1/{}.png", camera_timestamp),
-        //       img);
-        // }
-
-        if (track.coast_cycles_ < kMaxCoastCycles and
-            track.hit_streak_ >= kMinHits) {
-
-          size_t det_ind{0};
-          float max_iou{-1.0f};
-
-          for (auto &&[i, d] : enumerate(current_dets)) {
-            const float iou{Tracker::CalculateIou(d, track)};
-            if (max_iou < iou) {
-              det_ind = i;
-              max_iou = iou;
-            }
-          }
-
-          if (max_iou > 0.0f) {
-            Detection d;
-            d.timestamp_ = camera_timestamp;
-            d.box_ = current_dets[det_ind];
-            d.id_ = id;
-            d.code_ = code;
-            // d.class_ = dets.dets_[det_ind].class_;
-            // d.confidence_ = dets.dets_[det_ind].confidence_;
-
-            const auto track_id{fmt::format("{}_{}", code, id)};
-
-            if (not image_tracks_.contains(id)) {
-              image_tracks_[id].id_ = id;
-            }
-
-            image_tracks_[id].dets_.emplace_back(d);
-          }
-        }
-      }
-    }
-
-#if 0
-    if (dets.dets_.size() > 10) {
-
-      cv::Mat_<cv::Vec3b> img =
-          load_image("/root/data/rosbag2_2025_08_21-09_32_11", dets.timestamp_);
-
-      if (not img.empty()) {
-
-        for (auto &&d : dets.dets_) {
-          cv::rectangle(img, d.box_, {255.0, 0.0, 200.0}, 5);
-        }
-
-        cv::imwrite("test.png", img);
-      }
-    }
-#endif
-  }
-
-  for (auto &&[track_id, track] : image_tracks_) {
-
-    bool first_pose{true};
-    Eigen::Vector3d prev_pose{};
-    double length{0.0};
-
-    for (auto &&d : track.dets_) {
-
-      const auto it{
-          std::upper_bound(gps_.begin(), gps_.end(), d.timestamp_,
-                           [](const double val, const GpsMeasurement &m) {
-                             return val < m.timestamp_;
-                           })};
-
-      if (it != gps_.end()) {
-        const auto ind{std::distance(gps_.begin(), it)};
-
-        if (ind > 0) {
-
-          const auto t{
-              static_cast<double>(d.timestamp_ - gps_[ind - 1].timestamp_) /
-              static_cast<double>(gps_[ind].timestamp_ -
-                                  gps_[ind - 1].timestamp_)};
-
-          d.pose_ = Eigen::Vector3d{gps_[ind - 1].position_ * (1.0 - t) +
-                                    gps_[ind].position_ * t};
-
-          d.gps_ind_ = ind;
-        }
-      }
-
-      if (d.pose_.has_value()) {
-        if (first_pose) {
-          first_pose = false;
-          prev_pose = d.pose_.value();
-        } else {
-          length += (d.pose_.value() - prev_pose).norm();
-          prev_pose = d.pose_.value();
-        }
-      }
-    }
-    track.length_ = length;
-  }
-
-  LOG(INFO) << "num created tracks: " << image_tracks_.size();
-#endif
-}
-
 void BagProcessor::load_measurements(const std::string_view path) {
 
   rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image;
@@ -582,8 +419,6 @@ void BagProcessor::load_measurements(const std::string_view path) {
   rosbag2_cpp::Reader reader{};
 
   reader.open(path.data());
-
-  // Eigen::Vector3d prev_enu{Eigen::Vector3d::Zero()};
 
   uint64_t frame_idx{0};
 
@@ -599,7 +434,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
           static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
           static_cast<int64_t>(image_msg.header.stamp.nanosec)};
 
-      camera_.emplace_back(timestamp + camera_gps_delta_, frame_idx);
+      camera_.emplace_back(timestamp + set_.camera_gps_delta_, frame_idx);
       ++frame_idx;
 
     } else if (msg->topic_name == "/fix") {
@@ -610,40 +445,23 @@ void BagProcessor::load_measurements(const std::string_view path) {
                                1'000'000'000 +
                            static_cast<int64_t>(gps_msg.header.stamp.nanosec)};
 
-      if (not local_converter_) {
-        converter_reference_ = {gps_msg.latitude, gps_msg.longitude,
-                                gps_msg.altitude};
-
-        local_converter_ = std::make_unique<GeographicLib::LocalCartesian>(
-            gps_msg.latitude, gps_msg.longitude, gps_msg.altitude);
-
-        // gps_.emplace_back(timestamp, prev_enu,
-        //                   Eigen::Vector3d{gps_msg.latitude,
-        //                   gps_msg.longitude,
-        //                                   gps_msg.altitude});
+      if (not local_converter_.origin_set()) {
+        local_converter_.set_origin({gps_msg.latitude, gps_msg.longitude});
       }
 
-      Eigen::Vector3d enu{};
-      local_converter_->Forward(gps_msg.latitude, gps_msg.longitude,
-                                gps_msg.altitude, enu.x(), enu.y(), enu.z());
+      const Eigen::Vector2d enu{
+          local_converter_.enu({gps_msg.latitude, gps_msg.longitude})};
 
-      gps_.emplace_back(timestamp, enu,
+      gps_.emplace_back(timestamp, Eigen::Vector3d{enu.x(), enu.y(), 0.0},
                         Eigen::Vector3d{gps_msg.latitude, gps_msg.longitude,
                                         gps_msg.altitude});
-
-      // if ((enu - prev_enu).squaredNorm() >= 1.0) {
-      //   gps_.emplace_back(timestamp, enu,
-      //                     Eigen::Vector3d{gps_msg.latitude,
-      //                     gps_msg.longitude,
-      //                                     gps_msg.altitude});
-      //   prev_enu = enu;
-      // }
     }
   }
 
   std::sort(camera_.begin(), camera_.end(), [](const auto &a, const auto &b) {
     return a.timestamp_ < b.timestamp_;
   });
+
   std::sort(gps_.begin(), gps_.end(), [](const auto &a, const auto &b) {
     return a.timestamp_ < b.timestamp_;
   });
@@ -682,11 +500,9 @@ void BagProcessor::load_ground_truth_landmarks(const std::string_view path) {
       landmark.lla_.x() = latitude;
       landmark.lla_.y() = longitude;
 
-      Eigen::Vector3d enu{};
-      local_converter_->Forward(latitude, longitude, 0.0, enu.x(), enu.y(),
-                                enu.z());
+      const Eigen::Vector2d enu{local_converter_.enu({latitude, longitude})};
 
-      landmark.position_ = enu;
+      landmark.position_ = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
 
       ground_truth_landmarks_.push_back(landmark);
       ++landmark_id;
@@ -714,7 +530,7 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
   rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image;
   rosbag2_cpp::Reader reader{};
   reader.open(set_.bag_path_);
-  reader.seek(timestamp - camera_gps_delta_);
+  reader.seek(timestamp - set_.camera_gps_delta_);
 
   while (reader.has_next()) {
     auto msg{reader.read_next()};
@@ -728,7 +544,7 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
       const auto bag_timestamp{
           static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000l +
           static_cast<int64_t>(image_msg.header.stamp.nanosec) +
-          camera_gps_delta_};
+          set_.camera_gps_delta_};
 
       if (bag_timestamp == timestamp) {
         return cv::imdecode(image_msg.data, cv::IMREAD_UNCHANGED);
@@ -750,34 +566,29 @@ BagProcessor::estimate_camera_pos(Detection &d) {
     return std::nullopt;
   }
 
-  std::optional<Eigen::Vector2d> estimated_direction{};
+  Eigen::Vector2d estimated_direction{};
 
-  if (not estimated_direction.has_value()) {
+  const auto res{estimate_direction<poly_degree_>(points_in_the_radius,
+                                                  d.pose_.value().head(2))};
 
-    const auto [dir, poly_coeffs, hor_dir] = estimate_direction<poly_degree_>(
-        points_in_the_radius, d.pose_.value().head(2));
+  estimated_direction = res.direction_;
 
-    estimated_direction = dir;
+  if (estimated_direction.dot(direction) < 0.0) {
+    estimated_direction *= -1.0;
   }
 
-  if (estimated_direction.has_value()) {
+  d.direction_ = estimated_direction;
 
-    if (estimated_direction.value().dot(direction) < 0.0) {
-      estimated_direction.value() *= -1.0;
-    }
-
-    d.direction_ = estimated_direction;
-
-    return Eigen::Isometry3d{
-        Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
-        Eigen::AngleAxisd{correction_angle_ *
-                              boost::math::double_constants::degree,
-                          Eigen::Vector3d::UnitZ()} *
-        Eigen::AngleAxisd{-std::atan2(estimated_direction.value().x(),
-                                      estimated_direction.value().y()),
-                          Eigen::Vector3d::UnitZ()} *
-        Eigen::AngleAxisd{-0.5 * std::numbers::pi, Eigen::Vector3d::UnitX()}};
-  }
+  return Eigen::Isometry3d{
+      // Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
+      Eigen::Translation3d{res.point_.x(), res.point_.y(), 0.0f} *
+      Eigen::AngleAxisd{set_.correction_angle_ *
+                            boost::math::double_constants::degree,
+                        Eigen::Vector3d::UnitZ()} *
+      Eigen::AngleAxisd{
+          -std::atan2(estimated_direction.x(), estimated_direction.y()),
+          Eigen::Vector3d::UnitZ()} *
+      Eigen::AngleAxisd{-0.5 * std::numbers::pi, Eigen::Vector3d::UnitX()}};
 
   return std::nullopt;
 }
@@ -811,9 +622,10 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
       // auto estimated_direction{
       //     estimate_direction_spline(points_in_the_radius, cam_pose.head(2))};
 
-      auto [estimated_direction, poly_coeffs, hor_dir] =
-          estimate_direction<poly_degree_>(points_in_the_radius,
-                                           cam_pose.head(2));
+      const auto res{estimate_direction<poly_degree_>(points_in_the_radius,
+                                                      cam_pose.head(2))};
+
+      auto estimated_direction{res.direction_};
 
       // if (estimated_direction.has_value())
       {
@@ -826,7 +638,7 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
 
         return Eigen::Isometry3d{
             Eigen::Translation3d{cam_pose.x(), cam_pose.y(), 0.0f} *
-            Eigen::AngleAxisd{correction_angle_ * std::numbers::pi / 180.0,
+            Eigen::AngleAxisd{set_.correction_angle_ * std::numbers::pi / 180.0,
                               Eigen::Vector3d::UnitZ()} *
             Eigen::AngleAxisd{
                 -std::atan2(estimated_direction.x(), estimated_direction.y()),
@@ -921,13 +733,8 @@ BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
         arrow | transform([&landmark_transf, this](auto &&p) {
           const Eigen::Vector3d p0{landmark_transf * p};
 
-          double lat{0.0};
-          double lon{0.0};
-          double h{0.0};
-
-          local_converter_->Reverse(p0.x(), p0.y(), p0.z(), lat, lon, h);
-
-          return rerun::DVec2D{lat, lon};
+          const auto latlon{local_converter_.latlon(p0.head<2>())};
+          return rerun::DVec2D{latlon.x(), latlon.y()};
         }) |
         to<std::vector>()};
 
@@ -1020,8 +827,7 @@ BagProcessor &BagProcessor::log_camera(int64_t timestamp) {
   if (rec_) {
 
     const cv::Mat_<cv::Vec3b> img = load_image(timestamp);
-    cv::Mat_<cv::Vec3b> img_undist;
-    cv::undistort(img, img_undist, camera_matrix_, dist_coeffs_);
+    cv::Mat_<cv::Vec3b> img_undist = calib_.undistort_image(img);
     cv::cvtColor(img_undist, img_undist, cv::COLOR_BGR2RGB);
 
     if (auto cam_pose{estimate_camera_pos(timestamp)}; cam_pose.has_value()) {
@@ -1036,10 +842,10 @@ BagProcessor &BagProcessor::log_camera(int64_t timestamp) {
                     rerun::Mat3x3{r.data()}});
 
       rerun::Mat3x3 rerun_camera{rerun::Mat3x3::IDENTITY};
-      rerun_camera.flat_columns[0] = 0.1 * gtsam_cal3_s2.fx();
-      rerun_camera.flat_columns[4] = 0.1 * gtsam_cal3_s2.fy();
-      rerun_camera.flat_columns[6] = 0.1 * gtsam_cal3_s2.px();
-      rerun_camera.flat_columns[7] = 0.1 * gtsam_cal3_s2.py();
+      rerun_camera.flat_columns[0] = 0.1 * calib_.cal3_s2_.fx();
+      rerun_camera.flat_columns[4] = 0.1 * calib_.cal3_s2_.fy();
+      rerun_camera.flat_columns[6] = 0.1 * calib_.cal3_s2_.px();
+      rerun_camera.flat_columns[7] = 0.1 * calib_.cal3_s2_.py();
 
       rec_->log(
           fmt::format("world/camera_{}/image", timestamp),
@@ -1103,11 +909,10 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
 
           if (poly_points.empty()) {
 
-            auto [estimated_direction, poly, hor_dir] =
-                estimate_direction<poly_degree_>(points_in_the_radius,
-                                                 cam_pose.head(2));
+            const auto res{estimate_direction<poly_degree_>(
+                points_in_the_radius, cam_pose.head(2))};
 
-            if (hor_dir) {
+            if (res.horizontal_) {
               auto [min_it, max_it] = std::minmax_element(
                   points_in_the_radius.begin(), points_in_the_radius.end(),
                   [](const auto &a, const auto &b) { return a.x() < b.x(); });
@@ -1118,7 +923,7 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
                 double y{0.0};
                 double x_val{1.0};
 
-                for (auto &&p : poly) {
+                for (auto &&p : res.point_) {
                   y += p * x_val;
                   x_val *= x;
                 }
@@ -1137,7 +942,7 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
                 double x{0.0};
                 double y_val{1.0};
 
-                for (auto &&p : poly) {
+                for (auto &&p : res.poly_) {
                   x += p * y_val;
                   y_val *= y;
                 }
@@ -1215,33 +1020,25 @@ BagProcessor &BagProcessor::log_track(size_t track_id) {
               }
             }
 
-            std::vector<cv::Point2f> points{};
-
-            points.push_back(cv::Point2f{
+            const auto pund{calib_.undistort_point(cv::Point2f{
                 static_cast<float>(det.box_.x + (det.box_.width >> 1)),
-                static_cast<float>(det.box_.y + (det.box_.height >> 1))});
-
-            cv::undistortImagePoints(points, points, camera_matrix_,
-                                     dist_coeffs_);
+                static_cast<float>(det.box_.y + (det.box_.height >> 1))})};
 
             const double z0{150.0};
-            const double x{(points[0].x - gtsam_cal3_s2.px()) * z0 /
-                           gtsam_cal3_s2.fx()};
+            const double x{(pund.x - calib_.cal3_s2_.px()) * z0 /
+                           calib_.cal3_s2_.fx()};
 
-            const double y{(points[0].y - gtsam_cal3_s2.py()) * z0 /
-                           gtsam_cal3_s2.fy()};
+            const double y{(pund.y - calib_.cal3_s2_.py()) * z0 /
+                           calib_.cal3_s2_.fy()};
 
             const Eigen::Vector3d p0{cam_pose->translation()};
             const Eigen::Vector3d p1{(*cam_pose) * Eigen::Vector3d{x, y, z0}};
 
-            rerun::DVec2D lla0{};
-            rerun::DVec2D lla1{};
-            double h{0.0};
+            auto p{local_converter_.latlon(p0.head<2>())};
+            const rerun::DVec2D lla0{p.x(), p.y()};
 
-            local_converter_->Reverse(p0.x(), p0.y(), p0.z(), lla0.xy[0],
-                                      lla0.xy[1], h);
-            local_converter_->Reverse(p1.x(), p1.y(), p1.z(), lla1.xy[0],
-                                      lla1.xy[1], h);
+            p = local_converter_.latlon(p1.head<2>());
+            const rerun::DVec2D lla1{p.x(), p.y()};
 
             rec_->log(fmt::format("map/dir_{}", det.timestamp_),
                       rerun::GeoLineStrings{
@@ -1259,10 +1056,10 @@ BagProcessor &BagProcessor::log_track(size_t track_id) {
                     rerun::Mat3x3{r.data()}});
 
             rerun::Mat3x3 rerun_camera{rerun::Mat3x3::IDENTITY};
-            rerun_camera.flat_columns[0] = 0.25 * gtsam_cal3_s2.fx();
-            rerun_camera.flat_columns[4] = 0.25 * gtsam_cal3_s2.fy();
-            rerun_camera.flat_columns[6] = 0.25 * gtsam_cal3_s2.px();
-            rerun_camera.flat_columns[7] = 0.25 * gtsam_cal3_s2.py();
+            rerun_camera.flat_columns[0] = 0.25 * calib_.cal3_s2_.fx();
+            rerun_camera.flat_columns[4] = 0.25 * calib_.cal3_s2_.fy();
+            rerun_camera.flat_columns[6] = 0.25 * calib_.cal3_s2_.px();
+            rerun_camera.flat_columns[7] = 0.25 * calib_.cal3_s2_.py();
 
             rec_->log(fmt::format("world/camera_{}/image", det.timestamp_),
                       rerun::Pinhole{
@@ -1277,12 +1074,8 @@ BagProcessor &BagProcessor::log_track(size_t track_id) {
                           rerun::WidthHeight{static_cast<uint32_t>(img.cols),
                                              static_cast<uint32_t>(img.rows)}));
 
-            rerun::LatLon lla{};
-            double alt{0.0};
-
-            local_converter_->Reverse(det.pose_->x(), det.pose_->y(),
-                                      det.pose_->z(), lla.lat_lon.xy[0],
-                                      lla.lat_lon.xy[1], alt);
+            p = local_converter_.latlon(det.pose_->head<2>());
+            const rerun::LatLon lla{p.x(), p.y()};
 
             landmark_pos_map.push_back(lla);
           }
@@ -1374,8 +1167,7 @@ Landmark BagProcessor::triangulate(size_t track_id) const {
   return {};
 }
 
-std::vector<Landmark>
-BagProcessor::triangulate_tracks(double min_track_length) const {
+std::vector<Landmark> BagProcessor::triangulate_tracks() {
 
   std::vector<Landmark> res{};
 
@@ -1396,16 +1188,16 @@ BagProcessor::triangulate_tracks(double min_track_length) const {
 
 float BagProcessor::estimate_azimuth(const Eigen::Isometry3d pose,
                                      const Eigen::Vector2f p2d) const {
-  const double x{(p2d.x() - gtsam_cal3_s2.px()) / gtsam_cal3_s2.fx()};
-  const double y{(p2d.y() - gtsam_cal3_s2.py()) / gtsam_cal3_s2.fy()};
+  const double x{(p2d.x() - calib_.cal3_s2_.px()) / calib_.cal3_s2_.fx()};
+  const double y{(p2d.y() - calib_.cal3_s2_.py()) / calib_.cal3_s2_.fy()};
 
   const Eigen::Vector3d p0{pose.translation()};
   const Eigen::Vector3d p1{pose * Eigen::Vector3d{x, y, 1.0}};
 
   const Eigen::Vector2d dir{(p1 - p0).head<2>().normalized()};
 
-  static constexpr float radians{180.0f / std::numbers::pi_v<float>};
-  const float angle{static_cast<float>(std::atan2(dir.y(), dir.x())) * radians};
+  const float angle{static_cast<float>(std::atan2(dir.y(), dir.x())) *
+                    boost::math::float_constants::radian};
 
   return angle < 0.0f ? 360.0f + angle : angle;
 }
@@ -1430,15 +1222,9 @@ std::vector<size_t> BagProcessor::get_valid_tracks() {
 
       if (camera_pos.has_value()) {
 
-        std::vector<cv::Point2f> points{};
-        points.push_back(
-            cv::Point2f{static_cast<float>(d.box_.x + (d.box_.width >> 1)),
-                        static_cast<float>(d.box_.y + (d.box_.height >> 1))});
-
-        cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
-
         const float angle{
-            estimate_azimuth(camera_pos.value(), {points[0].x, points[0].y})};
+            estimate_azimuth(camera_pos.value(), {d.center_undistorted_.x,
+                                                  d.center_undistorted_.y})};
 
         min_angle = std::min(min_angle, angle);
         max_angle = std::max(max_angle, angle);
@@ -1472,18 +1258,10 @@ BagProcessor::triangulate(const ImageTrack &track) const {
     return std::nullopt;
   }
 
-#if 0
-  const auto measurement_noise{gtsam::noiseModel::Isotropic::Sigma(2, 1.0)};
-  gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> cameras{};
-  gtsam::Point2Vector measurements{};
-  float min_angle{std::numeric_limits<float>::max()};
-  float max_angle{std::numeric_limits<float>::min()};
-#endif
-
   std::optional<Eigen::Vector2d> prev_camera_pose{};
-  std::vector<FeatureTracker::TrackPoint> track_points{};
+  std::vector<TrackPoint> track_points{};
 
-  for (auto &&d : track.dets_) {
+  for (auto &&[i, d] : enumerate(track.dets_)) {
 
     if (not d.cam_to_world_.has_value()) {
       continue;
@@ -1492,7 +1270,6 @@ BagProcessor::triangulate(const ImageTrack &track) const {
     if (not prev_camera_pose.has_value()) {
       prev_camera_pose = d.cam_to_world_.value().translation().head<2>();
     } else {
-
       const Eigen::Vector2d current_camera_pose{
           d.cam_to_world_.value().translation().head<2>()};
 
@@ -1504,89 +1281,13 @@ BagProcessor::triangulate(const ImageTrack &track) const {
       }
     }
 
-    track_points.emplace_back(track.id_, d.timestamp_, d.box_,
-                              d.cam_to_world_.value(), d.angle_);
-
-#if 0
-    if (not d.pose_.has_value()) {
-
-      LOG(WARNING) << "detection doesn't have a pose value " << d.timestamp_;
-      continue;
+    if (track.roi().contains(d.center_)) {
+      track_points.push_back(track.track_point(i));
     }
-
-    const auto camera_pos{estimate_camera_pos(d)};
-
-    if (camera_pos.has_value()) {
-
-      if (first_pose) {
-        first_pose = false;
-        prev_camera_pose = camera_pos->translation().head<2>();
-      } else {
-
-        const Eigen::Vector2d current_camera_pose{
-            camera_pos->translation().head<2>()};
-
-        if ((current_camera_pose - prev_camera_pose).squaredNorm() >=
-            dist_threshold_squared_) {
-          prev_camera_pose = current_camera_pose;
-        } else {
-          continue;
-        }
-      }
-
-      std::vector<cv::Point2f> points{};
-      points.push_back(
-          cv::Point2f{static_cast<float>(d.box_.x + (d.box_.width >> 1)),
-                      static_cast<float>(d.box_.y + (d.box_.height >> 1))});
-
-      cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
-
-#if 0
-      const gtsam::Pose3 pose{gtsam::Rot3{camera_pos->linear()},
-                              gtsam::Vector3{camera_pos->translation()}};
-
-      measurements.emplace_back(points[0].x, points[0].y);
-
-      cameras.emplace_back(pose, gtsam_cal3_s2);
-#endif
-
-      const float angle{
-          estimate_azimuth(camera_pos.value(), {points[0].x, points[0].y})};
-
-      min_angle = std::min(min_angle, angle);
-      max_angle = std::max(max_angle, angle);
-
-      track_points.emplace_back(track.id_, d.timestamp_, d.box_,
-                                camera_pos.value(), angle);
-
-    } else {
-      LOG(WARNING) << "unable to estimate camera transform at " << d.timestamp_;
-    }
-
-#endif
   }
-
-  // if (measurements.size() < 5) {
-  //   LOG(WARNING) << "too little track points: " << measurements.size()
-  //                << ", id: " << track.id_;
-  //   return std::nullopt;
-  // }
-#if 0
-  const float delta_angle{max_angle - min_angle > 180.0f
-                              ? 360.0f - (max_angle - min_angle)
-                              : max_angle - min_angle};
-
-  if (delta_angle < angle_threshold_deg_) {
-    LOG(WARNING) << "trajectory angle is too small: "
-                 << (max_angle - min_angle);
-    return std::nullopt;
-  }
-#endif
-  // const Eigen::Vector3d p3d{triangulate_gtsam(cameras, measurements)};
 
   try {
-
-    auto landmark{feature_tracker_->triangulate(track_points)};
+    auto landmark{triangulate_on_boxes(track_points)};
 
     if (not landmark.has_value()) {
       LOG(WARNING) << "unable to triangulate landmark: " << track.id_;
@@ -1596,28 +1297,18 @@ BagProcessor::triangulate(const ImageTrack &track) const {
     Landmark l{landmark.value()};
     correct_orientation(l, gps_);
 
-    local_converter_->Reverse(l.position_.x(), l.position_.y(), l.position_.z(),
-                              l.lla_.x(), l.lla_.y(), l.lla_.z());
+    const auto latlon{local_converter_.latlon(l.position_.head<2>())};
 
+    l.lla_ = Eigen::Vector3d{latlon.x(), latlon.y(), 0.0};
     l.code_ = track.code_;
     l.id_ = track.id_;
+
     return l;
   } catch (std::exception &ex) {
     LOG(ERROR) << ex.what() << "track id: " << track.id_;
   }
 
   return std::nullopt;
-
-  // if (rec_) {
-  //   rec_->log(
-  //       fmt::format("world/{}", track.id_),
-  //       rerun::Points3D{{rerun::Position3D{static_cast<float>(p3d.x()),
-  //                                          static_cast<float>(p3d.y()),
-  //                                          0.0f}}}
-  //           .with_labels(rerun::Text{track.dets_.front().code_})
-  //           .with_colors(rerun::Color{255, 255, 0})
-  //           .with_radii(rerun::Radius::ui_points(10.0f)));
-  // }
 }
 
 BagProcessor &BagProcessor::log_track_directions(size_t track_id,
@@ -1645,25 +1336,18 @@ BagProcessor &BagProcessor::log_direction(size_t track_id, int64_t timestamp,
 
           if (camera_pos.has_value()) {
 
-            std::vector<cv::Point2f> points{};
-
-            points.push_back(cv::Point2f{
-                static_cast<float>(d.box_.x + (d.box_.width >> 1)),
-                static_cast<float>(d.box_.y + (d.box_.height >> 1))});
-
-            cv::undistortImagePoints(points, points, camera_matrix_,
-                                     dist_coeffs_);
-
             const float z0{ray_length};
             const float x{static_cast<float>(
-                (points[0].x - gtsam_cal3_s2.px()) * z0 / gtsam_cal3_s2.fx())};
+                (d.center_undistorted_.x - calib_.cal3_s2_.px()) * z0 /
+                calib_.cal3_s2_.fx())};
 
             const float y{static_cast<float>(
-                (points[0].y - gtsam_cal3_s2.py()) * z0 / gtsam_cal3_s2.fy())};
+                (d.center_undistorted_.y - calib_.cal3_s2_.py()) * z0 /
+                calib_.cal3_s2_.fy())};
 
-            Eigen::Vector3f p0{camera_pos->translation().cast<float>()};
-            Eigen::Vector3f p1{camera_pos->cast<float>() *
-                               Eigen::Vector3f{x, y, z0}};
+            const Eigen::Vector3f p0{camera_pos->translation().cast<float>()};
+            const Eigen::Vector3f p1{camera_pos->cast<float>() *
+                                     Eigen::Vector3f{x, y, z0}};
 
             rec_->log(
                 fmt::format("world/dir_{}", timestamp),
@@ -1685,10 +1369,7 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
 
   nlohmann::json j{};
   j["type"] = "FeatureCollection";
-  j["name"] = std::filesystem::path{set_.bag_path_}
-                  .filename()
-                  .replace_extension("")
-                  .string();
+  j["name"] = set_.session_name_;
 
   for (auto &&landmark : landmarks) {
     nlohmann::json feature{};
@@ -1719,20 +1400,14 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
   f << j.dump(4);
 }
 
+#if 0
 void BagProcessor::track_features() {
 
   FeatureTracker::Settings feature_tracker_set{};
 
-  feature_tracker_set.intrinsics_ = {camera_matrix_(0, 0), camera_matrix_(1, 1),
-                                     camera_matrix_(0, 2),
-                                     camera_matrix_(1, 2)};
-
-  feature_tracker_set.distortion_ = {dist_coeffs_(0), dist_coeffs_(1),
-                                     dist_coeffs_(2), dist_coeffs_(3)};
-
   feature_tracker_set.fast_threshold_ = 20;
-  feature_tracker_set.gridx_ = feature_tracker_set.width_ / 8;
-  feature_tracker_set.gridy_ = feature_tracker_set.height_ / 8;
+  feature_tracker_set.gridx_ = calib_.camera_resolution_.x() >> 3;
+  feature_tracker_set.gridy_ = calib_.camera_resolution_.y() >> 3;
   feature_tracker_set.num_feats_ =
       feature_tracker_set.gridx_ * feature_tracker_set.gridy_ * 30;
   feature_tracker_set.minpxdist_ = 1;
@@ -1785,7 +1460,7 @@ void BagProcessor::track_features() {
       const auto timestamp{
           static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
           static_cast<int64_t>(image_msg.header.stamp.nanosec) +
-          camera_gps_delta_};
+          set_.camera_gps_delta_};
 
       {
         cv::Mat_<cv::Vec3b> img =
@@ -1810,6 +1485,7 @@ void BagProcessor::track_features() {
   LOG(INFO) << "Finalizing...";
   feature_tracker_->finalize();
 }
+#endif
 
 void BagProcessor::change_angle(double angle_deg) {
   for (auto &&track_id : valid_tracks_) {
@@ -1844,16 +1520,31 @@ void BagProcessor::save(std::filesystem::path path) const {
   throw std::runtime_error{"unable to store object"};
 }
 
-BagProcessor BagProcessor::load(std::filesystem::path path) {
-  BagProcessor obj{};
+BagProcessor::ptr BagProcessor::load(std::filesystem::path path) {
+  auto obj{std::make_shared<BagProcessor>()};
+
   std::ifstream f{path, std::ios_base::binary};
 
   if (f.is_open() and f.good()) {
     boost::archive::binary_iarchive ia{f};
-    ia >> obj;
+    ia >> *obj;
     return obj;
   }
 
   throw std::runtime_error{"unable to load object"};
   return {};
+}
+
+ImageTrack::map_type BagProcessor::get_tracks() const {
+  ImageTrack::map_type res{};
+
+  for (auto &&[track_id, track] : image_tracks_) {
+    if (not track.valid_) {
+      continue;
+    }
+
+    res[track_id] = track;
+  }
+
+  return res;
 }

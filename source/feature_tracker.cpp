@@ -1,8 +1,6 @@
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
-#include <Eigen/src/Core/Array.h>
-#include <Eigen/src/Core/Matrix.h>
 #include <Eigen/src/Geometry/Hyperplane.h>
 #include <boost/math/constants/constants.hpp>
 #include <cam/CamRadtan.h>
@@ -48,6 +46,7 @@
 #include <rerun/components/lat_lon.hpp>
 #include <track/TrackBase.h>
 #include <track/TrackKLT.h>
+#include <triangulation.hpp>
 #include <tuple>
 #include <types.hpp>
 #include <unordered_map>
@@ -65,54 +64,6 @@ using ranges::views::take;
 using ranges::views::transform;
 using ranges::views::zip;
 
-std::vector<double> calculate_distances(
-    gtsam::Point3 p3d,
-    const gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> &cameras,
-    const gtsam::Point2Vector &measurements) {
-
-  const auto lines{zip(cameras, measurements) | transform([](const auto &val) {
-                     const auto &[cam, uv] = val;
-
-                     const auto &calib{cam.calibration()};
-
-                     const gtsam::Point3 p0{cam.pose().translation()};
-                     const gtsam::Point3 p1{
-                         cam.pose() *
-                         gtsam::Point3{(uv.x() - calib.px()) / calib.fx(),
-                                       (uv.y() - calib.py()) / calib.fy(),
-                                       1.0}};
-
-                     return Eigen::Hyperplane<double, 2>::Through(p0.head<2>(),
-                                                                  p1.head<2>());
-                   }) |
-                   to<std::vector>()};
-
-  const auto n{lines.size()};
-
-  std::vector<double> dists{};
-  dists.reserve(n);
-
-  for (auto &&l : lines) {
-    dists.push_back(l.absDistance(p3d.head<2>()));
-  }
-
-  return dists;
-}
-
-double calculate_std_dev(std::span<const double> distances) {
-
-  Eigen::ArrayXd d{};
-  d.resize(distances.size());
-
-  for (auto &&[i, dist] : enumerate(distances)) {
-    d(i) = dist;
-  }
-
-  const auto std_dev{std::sqrt((d - d.mean()).square().sum() /
-                               static_cast<double>(distances.size() - 1))};
-  return std_dev;
-}
-
 struct FeatureTracker::impl {
 
   struct FeatureInTheImage {
@@ -123,16 +74,20 @@ struct FeatureTracker::impl {
   impl(const FeatureTracker::Settings &set) : set_{set} {
 
     std::unordered_map<size_t, std::shared_ptr<ov_core::CamBase>> cameras{};
-    cameras[0] =
-        std::make_shared<ov_core::CamRadtan>(set_.width_, set_.height_);
+    cameras[0] = std::make_shared<ov_core::CamRadtan>(
+        set_.calib_.camera_resolution_.x(), set_.calib_.camera_resolution_.y());
 
     Eigen::MatrixXd calib;
     calib.resize(8, 1);
 
-    for (auto &&[i, val] :
-         enumerate(concat(set_.intrinsics_, set_.distortion_))) {
-      calib(i) = val;
-    }
+    calib(0) = set_.calib_.cal3_s2_.fx();
+    calib(1) = set_.calib_.cal3_s2_.fy();
+    calib(2) = set_.calib_.cal3_s2_.px();
+    calib(3) = set_.calib_.cal3_s2_.py();
+    calib(4) = set_.calib_.dist_coeffs_(0);
+    calib(5) = set_.calib_.dist_coeffs_(1);
+    calib(6) = set_.calib_.dist_coeffs_(2);
+    calib(7) = set_.calib_.dist_coeffs_(3);
 
     cameras[0]->set_value(calib);
 
@@ -141,20 +96,9 @@ struct FeatureTracker::impl {
           cameras, set_.num_feats_, 0, false, ov_core::TrackBase::HISTOGRAM,
           set_.fast_threshold_, set_.gridx_, set_.gridy_, set_.minpxdist_);
 
-      mask_ = cv::Mat_<uint8_t>::zeros(set_.height_, set_.width_);
+      mask_ = cv::Mat_<uint8_t>::zeros(set_.calib_.camera_resolution_.y(),
+                                       set_.calib_.camera_resolution_.x());
     }
-
-    gtsam_cal3_s2_ =
-        gtsam::Cal3_S2{set_.intrinsics_[0], set_.intrinsics_[1], 0.0,
-                       set_.intrinsics_[2], set_.intrinsics_[3]};
-
-    camera_matrix_ = cv::Mat_<double>::eye(3, 3);
-    camera_matrix_(0, 0) = set_.intrinsics_[0];
-    camera_matrix_(1, 1) = set_.intrinsics_[1];
-    camera_matrix_(0, 2) = set_.intrinsics_[2];
-    camera_matrix_(1, 2) = set_.intrinsics_[3];
-
-    dist_coeffs_ = cv::Mat_<double>(set_.distortion_, true);
   }
 
   void add(cv::Mat_<uint8_t> image, const ImageDetections &dets) {
@@ -217,10 +161,6 @@ struct FeatureTracker::impl {
 
     for (auto &&pose : track) {
       timestamp_to_pose[pose.timestamp_] = pose;
-    }
-
-    if (not set_.use_klt_) {
-      return triangulate_on_boxes(timestamp_to_pose);
     }
 
     std::unordered_set<size_t> feaures_in_the_track{};
@@ -305,7 +245,7 @@ struct FeatureTracker::impl {
                     "boxes, track_id: "
                  << track.begin()->id_;
 
-    return triangulate_on_boxes(timestamp_to_pose);
+    return triangulate_on_boxes(track);
   }
 
   void log_directions(
@@ -334,18 +274,15 @@ struct FeatureTracker::impl {
 
         const auto p{feature_db.at(feature_id)->uvs[0][feature_ind]};
 
-        std::vector<cv::Point2f> cv_points{};
-        cv_points.push_back(cv::Point2f{p.x(), p.y()});
-
-        cv::undistortImagePoints(cv_points, cv_points, camera_matrix_,
-                                 dist_coeffs_);
+        const auto p_und{set_.calib_.undistort_point(
+            feature_db.at(feature_id)->uvs[0][feature_ind])};
 
         const double z0{150.0};
-        const double x{(cv_points[0].x - gtsam_cal3_s2_.px()) * z0 /
-                       gtsam_cal3_s2_.fx()};
+        const double x{(p_und.x() - set_.calib_.cal3_s2_.px()) * z0 /
+                       set_.calib_.cal3_s2_.fx()};
 
-        const double y{(cv_points[0].y - gtsam_cal3_s2_.py()) * z0 /
-                       gtsam_cal3_s2_.fy()};
+        const double y{(p_und.y() - set_.calib_.cal3_s2_.py()) * z0 /
+                       set_.calib_.cal3_s2_.fy()};
 
         const Eigen::Vector3d p0{track_point.pose_.translation()};
         const Eigen::Vector3d p1{track_point.pose_ * Eigen::Vector3d{x, y, z0}};
@@ -432,13 +369,44 @@ struct FeatureTracker::impl {
         }
       }
 
-      cv::Mat_<cv::Vec3b> img_und{};
-      cv::undistort(img_tmp, img_und, camera_matrix_, dist_coeffs_);
+      cv::Mat_<cv::Vec3b> img_und = set_.calib_.undistort_image(img_tmp);
 
       cv::imwrite(
           fmt::format("/root/data/images/image_with_features_{}.png", stamp),
           img_und);
     }
+  }
+
+  double get_azimmuth(
+      Eigen::Vector3d normal,
+      const std::unordered_map<int64_t, TrackPoint> &timestamp_to_pose) {
+
+    int num_positives{0};
+    int num_negatives{0};
+
+    for (auto &&[timestamp, track_point] : timestamp_to_pose) {
+
+      const Eigen::Vector3d n{
+          track_point.pose_.inverse(Eigen::Isometry).linear() * normal};
+
+      if (n.z() < 0.0) {
+        ++num_negatives;
+      } else {
+        ++num_positives;
+      }
+    }
+
+    if (num_positives >= num_negatives) {
+      normal *= -1.0;
+    }
+
+    auto azimuth{std::atan2(normal.x(), normal.y())};
+
+    if (azimuth < 0.0) {
+      azimuth += boost::math::double_constants::two_pi;
+    }
+
+    return azimuth;
   }
 
   std::optional<Landmark> triangulate_on_features(
@@ -473,12 +441,12 @@ struct FeatureTracker::impl {
                 gtsam::Vector3{
                     timestamp_to_pose.at(stamp).pose_.translation()}};
 
-            cameras.emplace_back(pose, gtsam_cal3_s2_);
+            cameras.emplace_back(pose, set_.calib_.cal3_s2_);
           }
         }
       }
 
-      cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
+      set_.calib_.undistort_points(points);
 
       const gtsam::Point2Vector measurements{
           points |
@@ -499,186 +467,17 @@ struct FeatureTracker::impl {
     // log_directions(timestamp_to_pose, 10195);
 
     if (p3d.size() >= 3) {
-      return get_azimmuth(p3d, timestamp_to_pose);
+
+      const auto plane{fit_a_plane(p3d)};
+
+      Landmark landmark{};
+      landmark.position_ = plane.centroid_;
+      landmark.azimuth_ = get_azimmuth(plane.normal_, timestamp_to_pose);
+
+      return landmark;
     }
 
     return std::nullopt;
-  }
-
-  std::optional<Landmark> triangulate_on_boxes(
-      const std::unordered_map<int64_t, TrackPoint> &timestamp_to_pose) {
-
-    gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> cameras{};
-    const auto measurement_noise{gtsam::noiseModel::Isotropic::Sigma(2, 1.0)};
-
-    float mean_box_ratio{0.0f};
-    float rms_box_ratio{0.0f};
-
-    for (auto &&[stamp, d] : timestamp_to_pose) {
-
-      const float box_ratio{static_cast<float>(d.box_.width) /
-                            static_cast<float>(d.box_.height)};
-
-      mean_box_ratio += box_ratio;
-      // LOG(INFO) << "box ratio:" << box_ratio;
-    }
-
-    mean_box_ratio /= static_cast<float>(timestamp_to_pose.size());
-
-    // LOG(INFO) << "mean box ratio:" << mean_box_ratio;
-
-    for (auto &&[stamp, d] : timestamp_to_pose) {
-
-      const float box_ratio{static_cast<float>(d.box_.width) /
-                            static_cast<float>(d.box_.height)};
-
-      rms_box_ratio +=
-          (box_ratio - mean_box_ratio) * (box_ratio - mean_box_ratio);
-    }
-
-    rms_box_ratio =
-        std::sqrt(rms_box_ratio /
-                  (static_cast<float>(timestamp_to_pose.size()) *
-                   (static_cast<float>(timestamp_to_pose.size()) - 1.0f)));
-
-    for (auto &&[stamp, track_point] : timestamp_to_pose) {
-
-      const float box_ratio{static_cast<float>(track_point.box_.width) /
-                            static_cast<float>(track_point.box_.height)};
-
-      if (std::abs(box_ratio - mean_box_ratio) > 5.0f * rms_box_ratio) {
-        continue;
-      }
-
-      const gtsam::Pose3 pose{gtsam::Rot3{track_point.pose_.linear()},
-                              gtsam::Vector3{track_point.pose_.translation()}};
-
-      cameras.emplace_back(pose, gtsam_cal3_s2_);
-    }
-
-    // LOG(INFO) << "rms box ratio: " << rms_box_ratio;
-    std::vector<Eigen::Vector3d> p3d{};
-    std::vector<double> total_distances{};
-
-    for (auto &&u : linear_distribute(0.0, 1.0, 5)) {
-      for (auto &&v : linear_distribute(0.0, 1.0, 5)) {
-
-        std::vector<cv::Point2f> points{};
-
-        for (auto &&[stamp, track_point] : timestamp_to_pose) {
-
-          const float box_ratio{static_cast<float>(track_point.box_.width) /
-                                static_cast<float>(track_point.box_.height)};
-
-          if (std::abs(box_ratio - mean_box_ratio) > 5.0f * rms_box_ratio) {
-            continue;
-          }
-
-          const auto x{
-              static_cast<double>(track_point.box_.x) * (1.0 - v) +
-              static_cast<double>(track_point.box_.x + track_point.box_.width) *
-                  v};
-          const auto y{static_cast<double>(track_point.box_.y) * (1.0 - u) +
-                       static_cast<double>(track_point.box_.y +
-                                           track_point.box_.height) *
-                           u};
-          points.emplace_back(x, y);
-        }
-
-        cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
-
-        const gtsam::Point2Vector measurements{
-            points |
-            transform([](const auto &p) { return gtsam::Point2{p.x, p.y}; }) |
-            to<std::vector<gtsam::Point2,
-                           Eigen::aligned_allocator<gtsam::Point2>>>()};
-
-        try {
-
-          const auto triangulated_point{gtsam::triangulatePoint3(
-              cameras, measurements, 1.0e-9, true, measurement_noise, true)};
-
-          const auto distances{
-              calculate_distances(triangulated_point, cameras, measurements)};
-
-          total_distances.insert(total_distances.end(), distances.begin(),
-                                 distances.end());
-
-          p3d.push_back(triangulated_point);
-        } catch (...) {
-        }
-      }
-    }
-
-    log_points(p3d, {});
-    // log_intersections(total_intersections);
-
-    if (p3d.size() >= 3) {
-      auto l{get_azimmuth(p3d, timestamp_to_pose)};
-
-      const auto std_dev{calculate_std_dev(total_distances)};
-      l.dist_std_dev_ = std_dev;
-
-      return l;
-    }
-
-    return std::nullopt;
-  }
-
-  std::pair<Eigen::Vector3d, Eigen::Vector3d>
-  fit_a_plane(std::span<const Eigen::Vector3d> points) {
-
-    Eigen::Matrix3Xd m{};
-    m.resize(3, points.size());
-
-    for (int i{0}; auto &&p : points) {
-      m.col(i) = p;
-      ++i;
-    }
-
-    const Eigen::Vector3d center{m.rowwise().mean()};
-    m.colwise() -= center;
-
-    const Eigen::Vector3d normal{
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>{m * m.transpose()}
-            .eigenvectors()
-            .col(0)};
-
-    return {normal, center};
-  }
-
-  Landmark get_azimmuth(
-      std::span<const Eigen::Vector3d> points,
-      const std::unordered_map<int64_t, TrackPoint> &timestamp_to_pose) {
-
-    auto [normal, center]{fit_a_plane(points)};
-
-    int num_positives{0};
-    int num_negatives{0};
-
-    for (auto &&[stamp, track_point] : timestamp_to_pose) {
-
-      const Eigen::Vector3d n{
-          track_point.pose_.inverse(Eigen::Isometry).linear() * normal};
-
-      if (n.z() < 0.0) {
-        ++num_negatives;
-      } else {
-        ++num_positives;
-      }
-    }
-
-    if (num_positives >= num_negatives) {
-      normal *= -1.0;
-    }
-
-    auto azimuth{std::atan2(normal.x(), normal.y())};
-
-    if (azimuth < 0.0) {
-      azimuth += boost::math::double_constants::two_pi;
-    }
-
-    return Landmark{.position_ = center, .azimuth_ = azimuth};
   }
 
   void log_intersections(std::span<const Eigen::Vector2d> points) {
@@ -761,9 +560,6 @@ struct FeatureTracker::impl {
   cv::Mat_<uint8_t> mask_;
   std::unordered_map<int64_t, std::vector<FeatureInTheImage>>
       stamp_to_feature_id_{};
-  gtsam::Cal3_S2 gtsam_cal3_s2_;
-  cv::Mat_<double> camera_matrix_;
-  cv::Mat_<double> dist_coeffs_;
 
   std::unordered_map<int64_t, cv::Mat_<uint8_t>> images_;
   std::unordered_map<size_t, cv::Scalar> feature_id_to_color_;

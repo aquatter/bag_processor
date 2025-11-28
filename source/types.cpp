@@ -1,17 +1,19 @@
 #include <Eigen/Core>
-#include <algorithm>
 #include <boost/math/constants/constants.hpp>
 #include <cmath>
+#include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <limits>
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
-#include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <stdexcept>
 #include <types.hpp>
 #include <unordered_set>
+#include <vector>
 
 using boost::math::float_constants::degree;
 using boost::math::float_constants::pi;
@@ -93,14 +95,15 @@ bool ImageTrack::should_be_linked(const ImageTrack &track) const {
   cv::Mat_<cv::Vec3b> dbg_img{};
   bool dbg_case{false};
 
-  if ((id_ == 198 and track.id_ == 199) or (id_ == 199 and track.id_ == 198)) {
-    dbg_img = cv::Mat_<cv::Vec3b>::zeros(2160, 3840);
-    dbg_case = true;
-  }
+  // if ((id_ == 198 and track.id_ == 199) or (id_ == 199 and track.id_ == 198))
+  // {
+  //   dbg_img = cv::Mat_<cv::Vec3b>::zeros(2160, 3840);
+  //   dbg_case = true;
+  // }
 
-  const cv::Rect roi{170, 170, 3500, 1820};
+  const cv::Rect roi{track.roi()};
 
-  dbg_case = false;
+  // dbg_case = false;
 
   angle_accumulator angle_accum{};
   length_accumulator length_accum{};
@@ -179,4 +182,50 @@ bool ImageTrack::should_be_linked(const ImageTrack &track) const {
 void ImageTrack::link(ImageTrack &d) {
   linked_tracks_.insert(d.id_);
   d.linked_tracks_.insert(id_);
+}
+
+TrackPoint ImageTrack::track_point(size_t i) const {
+
+  if (i >= dets_.size()) {
+    throw std::runtime_error{"requested detection out of boundaries"};
+  }
+
+  return TrackPoint{.id_ = id_,
+                    .timestamp_ = dets_[i].timestamp_,
+                    .box_ = dets_[i].box_,
+                    .center_ = dets_[i].center_,
+                    .center_undistorted_ = dets_[i].center_undistorted_,
+                    .pose_ = dets_[i].cam_to_world_.value(),
+                    .angle_ = dets_[i].angle_,
+                    .calib_ = calib_};
+}
+
+cv::Point2f CalibrationDesc::undistort_point(const cv::Point2f &p) const {
+  std::vector<cv::Point2f> points{};
+  points.push_back(p);
+  undistort_points(points);
+  return points.front();
+}
+
+void CalibrationDesc::undistort_points(std::vector<cv::Point2f> &points) const {
+  cv::undistortImagePoints(points, points, camera_matrix_, dist_coeffs_);
+}
+
+cv::Mat_<cv::Vec3b>
+CalibrationDesc::undistort_image(cv::Mat_<cv::Vec3b> image) const {
+  cv::Mat_<cv::Vec3b> img_undist;
+  cv::undistort(image, img_undist, camera_matrix_, dist_coeffs_);
+  return img_undist;
+}
+
+void CalibrationDesc::print() const noexcept {
+  fmt::print(fmt::fg(fmt::color::green_yellow), "\nCamera resolution:\n");
+  fmt::print(fmt::fg(fmt::color::orange_red), "{} x {}\n",
+             camera_resolution_.x(), camera_resolution_.y());
+  fmt::print(fmt::fg(fmt::color::green_yellow), "Camera intrinsics gtsam:\n");
+  cal3_s2_.print("");
+  fmt::print(fmt::fg(fmt::color::green_yellow), "Camera matrix opencv:\n");
+  std::cout << camera_matrix_ << "\n";
+  fmt::print(fmt::fg(fmt::color::green_yellow), "Distortion coefficients:\n");
+  std::cout << dist_coeffs_ << "\n\n";
 }

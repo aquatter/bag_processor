@@ -44,6 +44,10 @@ add_executable(${PROJECT_NAME}
     source/utils.cpp
     source/types.cpp
     source/bag_loader.cpp
+    source/triangulation.cpp
+    source/tracks_collection.cpp
+    source/rerun_logging.cpp
+    source/cartesian_converter.cpp
     ${ALGLIB_SOURCES}
 )
 

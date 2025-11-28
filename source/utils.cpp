@@ -7,7 +7,6 @@
 #include <flann/algorithms/dist.h>
 #include <flann/flann.hpp>
 #include <flann/util/matrix.h>
-#include <functional>
 #include <gtsam/geometry/triangulation.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
@@ -16,7 +15,6 @@
 #include <memory>
 #include <ng-log/logging.h>
 #include <nlohmann/json.hpp>
-#include <queue>
 #include <range/v3/algorithm/copy.hpp>
 #include <range/v3/algorithm/find_if.hpp>
 #include <range/v3/algorithm/max.hpp>
@@ -299,9 +297,10 @@ void correct_orientation(Landmark &landmark,
     return;
   }
 
-  auto [poly_direction, poly_coeffs, hor_dir] =
-      estimate_direction<BagProcessor::poly_degree_>(
-          points, gps_track[ind].position_.head<2>());
+  const auto res{estimate_direction<BagProcessor::poly_degree_>(
+      points, gps_track[ind].position_.head<2>())};
+
+  auto poly_direction{res.direction_};
 
   if (poly_direction.dot(direction) > 0.0) {
     poly_direction *= -1.0;
@@ -542,7 +541,7 @@ bool Metrics::Result::save(const std::string_view path,
 
 void combine_landmarks(std::vector<Landmark> &landmarks,
                        const ImageTrack::map_type &tracks,
-                       const GeographicLib::LocalCartesian &converter) {
+                       const CartesianConverter &converter) {
 
   std::unordered_map<size_t, Landmark *> id_to_landmark{};
 
@@ -594,34 +593,33 @@ void combine_landmarks(std::vector<Landmark> &landmarks,
     double norm{0.0};
 
     for (auto &&id : existing_landmarks) {
-      const auto std_dev{id_to_landmark[id]->dist_std_dev_};
-      mean_position += id_to_landmark[id]->position_ / std_dev;
-      mean_azimuth += id_to_landmark[id]->azimuth_ / std_dev;
-      norm += 1.0 / std_dev;
+      const auto var{id_to_landmark[id]->dist_variance_};
+      mean_position += id_to_landmark[id]->position_ / var;
+      mean_azimuth += id_to_landmark[id]->azimuth_ / var;
+      norm += 1.0 / var;
     }
 
     mean_position /= norm;
     mean_azimuth /= norm;
 
-    Eigen::Vector3d mean_lla{};
-
-    converter.Reverse(mean_position.x(), mean_position.y(), mean_position.z(),
-                      mean_lla.x(), mean_lla.y(), mean_lla.z());
+    const auto mean_lla{converter.latlon(mean_position.head<2>())};
 
     for (auto &&id : existing_landmarks) {
       id_to_landmark[id]->position_ = mean_position;
-      id_to_landmark[id]->lla_ = mean_lla;
+      id_to_landmark[id]->lla_ =
+          Eigen::Vector3d{mean_lla.x(), mean_lla.y(), 0.0};
       id_to_landmark[id]->azimuth_ = mean_azimuth;
     }
 
     for (auto &&id : landmarks_to_add) {
       const auto &track{tracks.at(id)};
-      added_landmarks.emplace_back(Landmark{.id_ = track.id_,
-                                            .code_ = track.code_,
-                                            .position_ = mean_position,
-                                            .lla_ = mean_lla,
-                                            .azimuth_ = mean_azimuth,
-                                            .dist_std_dev_ = 0.0});
+      added_landmarks.emplace_back(
+          Landmark{.id_ = track.id_,
+                   .code_ = track.code_,
+                   .position_ = mean_position,
+                   .lla_ = Eigen::Vector3d{mean_lla.x(), mean_lla.y(), 0.0},
+                   .azimuth_ = mean_azimuth,
+                   .dist_variance_ = 1.0 / norm});
     }
   }
 

@@ -119,6 +119,12 @@ struct BagLoader::impl {
     }
   }
 
+  void dump_detection(const std::string_view path, const Detection &det) {
+    auto img = load_image(det.timestamp_ - set_.timestamp_delta_);
+    cv::rectangle(img, det.box_, {0.0, 255.0, 0.0}, 2);
+    cv::imwrite(path.data(), img);
+  }
+
   BagLoader::Settings set_;
   rosbag2_cpp::Reader reader_;
   rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image_;
@@ -136,6 +142,11 @@ void BagLoader::dump_tracks(const ImageTrack::map_type &tracks,
                             size_t track_id) {
 
   pimpl_->dump_tracks(tracks, detections, track_id);
+}
+
+void BagLoader::dump_detection(const std::string_view path,
+                               const Detection &det) {
+  pimpl_->dump_detection(path, det);
 }
 
 BagLoader::~BagLoader() = default;

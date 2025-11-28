@@ -2,15 +2,62 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <Eigen/src/Core/Matrix.h>
 #include <cstddef>
 #include <cstdint>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/geometry/PinholeCamera.h>
+#include <gtsam/geometry/Pose3.h>
 #include <opencv2/core.hpp>
+#include <opencv2/core/types.hpp>
 #include <optional>
 #include <serialization.hpp>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+struct Plane3d {
+  Eigen::Vector3d centroid_;
+  Eigen::Vector3d normal_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & centroid_;
+    ar & normal_;
+  }
+};
+
+struct CalibrationDesc {
+  gtsam::Cal3_S2 cal3_s2_;
+  cv::Mat_<double> camera_matrix_;
+  cv::Mat_<double> dist_coeffs_;
+  Eigen::Vector2i camera_resolution_;
+
+  cv::Point2f undistort_point(const cv::Point2f &p) const;
+
+  template <typename Scalar>
+  Eigen::Matrix<Scalar, 2, 1>
+  undistort_point(const Eigen::Matrix<Scalar, 2, 1> &p) const {
+
+    const auto p_und{undistort_point(
+        cv::Point2f{static_cast<float>(p.x()), static_cast<float>(p.y())})};
+
+    return {static_cast<Scalar>(p_und.x), static_cast<Scalar>(p_und.y)};
+  }
+
+  void undistort_points(std::vector<cv::Point2f> &points) const;
+
+  cv::Mat_<cv::Vec3b> undistort_image(cv::Mat_<cv::Vec3b> image) const;
+
+  void print() const noexcept;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & cal3_s2_;
+    ar & camera_matrix_;
+    ar & dist_coeffs_;
+    ar & camera_resolution_;
+  }
+};
 
 struct Detection {
 
@@ -63,9 +110,50 @@ struct ImageDetections {
   std::unordered_map<size_t, Detection *> track_id_to_detection_;
 };
 
+struct TrackPoint {
+  size_t id_;
+  int64_t timestamp_;
+  cv::Rect box_;
+  cv::Point center_;
+  cv::Point2f center_undistorted_;
+  Eigen::Isometry3d pose_;
+  float angle_;
+  CalibrationDesc calib_;
+
+  operator gtsam::PinholeCamera<gtsam::Cal3_S2>() const {
+    return gtsam::PinholeCamera<gtsam::Cal3_S2>{
+        gtsam::Pose3{gtsam::Rot3{pose_.linear()},
+                     gtsam::Vector3{pose_.translation()}},
+        calib_.cal3_s2_};
+  }
+};
+
+struct Landmark {
+  size_t id_;
+  std::unordered_set<size_t> parent_tracks_;
+  std::string code_;
+  Eigen::Vector3d position_;
+  Eigen::Vector3d lla_;
+  double azimuth_;
+  double dist_variance_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & id_;
+    ar & parent_tracks_;
+    ar & code_;
+    ar & position_;
+    ar & lla_;
+    ar & azimuth_;
+    ar & dist_variance_;
+  }
+};
+
 struct ImageTrack {
   using map_type = std::unordered_map<size_t, ImageTrack>;
+  using vec_type = std::vector<ImageTrack>;
+  using span_type = std::span<const ImageTrack>;
 
+  std::string name_;
   size_t id_;
   std::string code_;
   std::vector<Detection> dets_;
@@ -76,11 +164,23 @@ struct ImageTrack {
   double length_;
 
   std::unordered_set<size_t> linked_tracks_;
+  CalibrationDesc calib_;
+
+  Eigen::Vector2d geodetic_origin_;
 
   [[nodiscard]] bool should_be_linked(const ImageTrack &track) const;
   void link(ImageTrack &d);
 
+  TrackPoint track_point(size_t i) const;
+
+  [[nodiscard]] cv::Rect roi() const noexcept {
+    return {roi_border_, roi_border_,
+            calib_.camera_resolution_.x() - 2 * roi_border_,
+            calib_.camera_resolution_.y() - 2 * roi_border_};
+  }
+
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & name_;
     ar & id_;
     ar & code_;
     ar & dets_;
@@ -88,6 +188,8 @@ struct ImageTrack {
     ar & valid_;
     ar & length_;
     ar & linked_tracks_;
+    ar & calib_;
+    ar & geodetic_origin_;
 
     if (Archive::is_loading::value) {
       for (auto &&d : dets_) {
@@ -95,6 +197,8 @@ struct ImageTrack {
       }
     }
   }
+
+  static constexpr int roi_border_{170};
 };
 
 struct GpsMeasurement {
@@ -116,23 +220,5 @@ struct CameraMeasurement {
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & timestamp_;
     ar & id_;
-  }
-};
-
-struct Landmark {
-  size_t id_;
-  std::string code_;
-  Eigen::Vector3d position_;
-  Eigen::Vector3d lla_;
-  double azimuth_;
-  double dist_std_dev_;
-
-  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
-    ar & id_;
-    ar & code_;
-    ar & position_;
-    ar & lla_;
-    ar & azimuth_;
-    ar & dist_std_dev_;
   }
 };

@@ -1,7 +1,8 @@
 #pragma once
+
 #include <Eigen/Geometry>
-#include <GeographicLib/LocalCartesian.hpp>
 #include <boost/math/constants/constants.hpp>
+#include <cartesian_converter.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <feature_tracker.hpp>
@@ -25,9 +26,11 @@ struct BagProcessorSettings {
   std::string annotations_path_;
   std::string calibration_path_;
   std::string ground_truth_path_;
+  double correction_angle_;
+  int64_t camera_gps_delta_;
   bool use_klt_;
   bool use_logger_;
-  std::shared_ptr<rerun::RecordingStream> rec_;
+  std::string session_name_;
 
   template <typename Archive>
   void serialize(Archive &ar, const unsigned int version) {
@@ -35,19 +38,26 @@ struct BagProcessorSettings {
     ar & annotations_path_;
     ar & calibration_path_;
     ar & ground_truth_path_;
+    ar & correction_angle_;
+    ar & camera_gps_delta_;
     ar & use_klt_;
     ar & use_logger_;
+    ar & session_name_;
   }
 };
 
+class TrackIndexer;
+class TracksCollection;
+
 class BagProcessor {
 public:
-  BagProcessor() = default;
+  using ptr = std::shared_ptr<BagProcessor>;
+
+  BagProcessor();
   BagProcessor(const BagProcessorSettings &set);
 
   void calculate();
-  void calculate_metrics(std::filesystem::path path,
-                         const std::string_view title = {});
+  void calculate_metrics(std::filesystem::path path);
 
   void optimize_angle(double from, double to, ptrdiff_t num);
 
@@ -72,7 +82,7 @@ public:
   BagProcessor &log_images(int64_t from, int64_t to);
 
   Landmark triangulate(size_t track_id) const;
-  std::vector<Landmark> triangulate_tracks(double min_track_length = 5.0) const;
+  std::vector<Landmark> triangulate_tracks();
 
   void save_geojson(std::span<const Landmark> landmarks,
                     const std::string_view path) const;
@@ -81,11 +91,16 @@ public:
 
   void save(std::filesystem::path path) const;
 
-  [[nodiscard]] static BagProcessor load(std::filesystem::path path);
+  [[nodiscard]] static BagProcessor::ptr load(std::filesystem::path path);
+
+  void set_rerun(std::shared_ptr<rerun::RecordingStream> rec) { rec_ = rec; }
+
+  ImageTrack::map_type get_tracks() const;
+
+  const BagProcessorSettings &settings() const { return set_; }
 
 private:
   void load_calibration(const std::string_view path);
-  void create_tracks();
   void load_tracks();
   void load_measurements(const std::string_view path);
   void load_ground_truth_landmarks(const std::string_view path);
@@ -106,62 +121,45 @@ private:
 
   BagProcessorSettings set_;
   std::shared_ptr<rerun::RecordingStream> rec_;
-  gtsam::Cal3_S2 gtsam_cal3_s2;
-  cv::Mat_<double> camera_matrix_;
-  cv::Mat_<double> dist_coeffs_;
   std::unordered_map<size_t, ImageTrack> image_tracks_;
   std::vector<CameraMeasurement> camera_;
   std::vector<GpsMeasurement> gps_;
   std::unordered_map<int64_t, ImageDetections> image_detections_;
-  std::unique_ptr<GeographicLib::LocalCartesian> local_converter_;
+  CartesianConverter local_converter_;
   std::vector<Landmark> ground_truth_landmarks_;
   std::string most_frequent_landmark_;
   std::unordered_map<std::string, cv::Scalar> color_map_;
-  Eigen::Vector2i camera_resolution_;
-
-  std::unique_ptr<FeatureTracker> feature_tracker_;
-  Eigen::Vector3d converter_reference_;
 
   std::vector<size_t> valid_tracks_;
   size_t track_num_;
   std::vector<Landmark> found_landmarks_;
+  CalibrationDesc calib_;
 
+  friend class TrackIndexer;
+  friend class TracksCollection;
   friend class boost::serialization::access;
 
-  template <typename Archive>
-  void serialize(Archive &ar, const unsigned int version) {
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & set_;
-    ar & gtsam_cal3_s2;
-    ar & camera_matrix_;
-    ar & dist_coeffs_;
     ar & image_tracks_;
     ar & camera_;
     ar & gps_;
     ar & ground_truth_landmarks_;
     ar & most_frequent_landmark_;
-    ar & camera_resolution_;
-    ar & converter_reference_;
     ar & valid_tracks_;
     ar & track_num_;
     ar & found_landmarks_;
+    ar & calib_;
+    ar & local_converter_;
 
     if (Archive::is_loading::value) {
-      local_converter_ = std::make_unique<GeographicLib::LocalCartesian>(
-          converter_reference_.x(), converter_reference_.y(),
-          converter_reference_.z());
-
       collect_detections();
-      track_features();
     }
   }
 
 public:
   static constexpr int poly_degree_{3};
   static constexpr double search_radius_{20.0};
-  // static constexpr int64_t camera_gps_delta_{1'300'000'000l};
-  // static constexpr int64_t camera_gps_delta_{-30'000'000};
-  static constexpr int64_t camera_gps_delta_{0'000'000};
-  static constexpr double correction_angle_{4.0};
   static constexpr double dist_threshold_squared_{0.3 * 0.3};
   static constexpr float angle_threshold_deg_{20.0f};
   static constexpr double max_dist_to_track_sqr_{15.0 * 15.0};
