@@ -70,7 +70,7 @@ struct Detection {
   cv::Rect box_;
   cv::Point center_;
   cv::Point2f center_undistorted_;
-  std::optional<Eigen::Vector3d> pose_;
+  std::optional<Eigen::Vector2d> enu_;
   std::optional<Eigen::Isometry3d> cam_to_world_;
   float angle_;
   ptrdiff_t gps_ind_;
@@ -91,7 +91,7 @@ struct Detection {
     ar & box_;
     ar & center_;
     ar & center_undistorted_;
-    ar & pose_;
+    ar & enu_;
     ar & cam_to_world_;
     ar & angle_;
     ar & gps_ind_;
@@ -132,8 +132,8 @@ struct Landmark {
   size_t id_;
   std::unordered_set<size_t> parent_tracks_;
   std::string code_;
-  Eigen::Vector3d position_;
-  Eigen::Vector3d lla_;
+  Eigen::Vector2d enu_;
+  Eigen::Vector2d latlon_;
   double azimuth_;
   double dist_variance_;
 
@@ -141,8 +141,8 @@ struct Landmark {
     ar & id_;
     ar & parent_tracks_;
     ar & code_;
-    ar & position_;
-    ar & lla_;
+    ar & enu_;
+    ar & latlon_;
     ar & azimuth_;
     ar & dist_variance_;
   }
@@ -168,6 +168,9 @@ struct ImageTrack {
 
   Eigen::Vector2d geodetic_origin_;
 
+  std::optional<Landmark> landmark_;
+  std::vector<size_t> selected_detections_;
+
   [[nodiscard]] bool should_be_linked(const ImageTrack &track) const;
   void link(ImageTrack &d);
 
@@ -190,6 +193,8 @@ struct ImageTrack {
     ar & linked_tracks_;
     ar & calib_;
     ar & geodetic_origin_;
+    ar & landmark_;
+    ar & selected_detections_;
 
     if (Archive::is_loading::value) {
       for (auto &&d : dets_) {
@@ -203,13 +208,13 @@ struct ImageTrack {
 
 struct GpsMeasurement {
   int64_t timestamp_;
-  Eigen::Vector3d position_;
-  Eigen::Vector3d lla_;
+  Eigen::Vector2d enu_;
+  Eigen::Vector2d latlon_;
 
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & timestamp_;
-    ar & position_;
-    ar & lla_;
+    ar & enu_;
+    ar & latlon_;
   }
 };
 

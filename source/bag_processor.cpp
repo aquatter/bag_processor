@@ -139,8 +139,8 @@ void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
 
     auto res{metrics.eval(found_landmarks)};
 
-    if (max_auc < res.auc_) {
-      max_auc = res.auc_;
+    if (max_auc < res.precision_auc_) {
+      max_auc = res.precision_auc_;
       best_result = std::move(res);
       best_angle = angle;
       best_landmarks = std::move(found_landmarks);
@@ -366,7 +366,7 @@ void BagProcessor::load_tracks() {
   for (auto &&[track_id, track] : image_tracks_) {
 
     bool first_pose{true};
-    Eigen::Vector3d prev_pose{};
+    Eigen::Vector2d prev_pose{};
     double length{0.0};
 
     for (auto &&d : track.dets_) {
@@ -387,20 +387,20 @@ void BagProcessor::load_tracks() {
               static_cast<double>(gps_[ind].timestamp_ -
                                   gps_[ind - 1].timestamp_)};
 
-          d.pose_ = Eigen::Vector3d{gps_[ind - 1].position_ * (1.0 - t) +
-                                    gps_[ind].position_ * t};
+          d.enu_ = Eigen::Vector2d{gps_[ind - 1].enu_ * (1.0 - t) +
+                                   gps_[ind].enu_ * t};
 
           d.gps_ind_ = ind;
         }
       }
 
-      if (d.pose_.has_value()) {
+      if (d.enu_.has_value()) {
         if (first_pose) {
           first_pose = false;
-          prev_pose = d.pose_.value();
+          prev_pose = d.enu_.value();
         } else {
-          length += (d.pose_.value() - prev_pose).norm();
-          prev_pose = d.pose_.value();
+          length += (d.enu_.value() - prev_pose).norm();
+          prev_pose = d.enu_.value();
         }
       }
 
@@ -426,7 +426,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
     auto msg{reader.read_next()};
     const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
 
-    if (msg->topic_name == "/camera/image_raw/compressed") {
+    if (msg->topic_name == set_.compressed_image_topic_) {
       sensor_msgs::msg::CompressedImage image_msg;
       serialization_image.deserialize_message(&serialized_msg, &image_msg);
 
@@ -437,7 +437,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
       camera_.emplace_back(timestamp + set_.camera_gps_delta_, frame_idx);
       ++frame_idx;
 
-    } else if (msg->topic_name == "/fix") {
+    } else if (msg->topic_name == set_.gps_topic_) {
       sensor_msgs::msg::NavSatFix gps_msg;
       serialization_gps.deserialize_message(&serialized_msg, &gps_msg);
 
@@ -449,12 +449,10 @@ void BagProcessor::load_measurements(const std::string_view path) {
         local_converter_.set_origin({gps_msg.latitude, gps_msg.longitude});
       }
 
-      const Eigen::Vector2d enu{
-          local_converter_.enu({gps_msg.latitude, gps_msg.longitude})};
-
-      gps_.emplace_back(timestamp, Eigen::Vector3d{enu.x(), enu.y(), 0.0},
-                        Eigen::Vector3d{gps_msg.latitude, gps_msg.longitude,
-                                        gps_msg.altitude});
+      gps_.emplace_back(
+          timestamp,
+          local_converter_.enu({gps_msg.latitude, gps_msg.longitude}),
+          Eigen::Vector2d{gps_msg.latitude, gps_msg.longitude});
     }
   }
 
@@ -497,12 +495,10 @@ void BagProcessor::load_ground_truth_landmarks(const std::string_view path) {
         continue;
       }
 
-      landmark.lla_.x() = latitude;
-      landmark.lla_.y() = longitude;
+      landmark.latlon_.x() = latitude;
+      landmark.latlon_.y() = longitude;
 
-      const Eigen::Vector2d enu{local_converter_.enu({latitude, longitude})};
-
-      landmark.position_ = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+      landmark.enu_ = local_converter_.enu({latitude, longitude});
 
       ground_truth_landmarks_.push_back(landmark);
       ++landmark_id;
@@ -558,7 +554,7 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
 std::optional<Eigen::Isometry3d>
 BagProcessor::estimate_camera_pos(Detection &d) {
   const auto [points_in_the_radius, direction] = get_points_in_the_radius(
-      gps_, search_radius_, d.pose_.value(), d.gps_ind_);
+      gps_, search_radius_, d.enu_.value(), d.gps_ind_);
 
   if (points_in_the_radius.size() < 5) {
     LOG(WARNING) << "unable to interpolate path, too little points: "
@@ -568,8 +564,8 @@ BagProcessor::estimate_camera_pos(Detection &d) {
 
   Eigen::Vector2d estimated_direction{};
 
-  const auto res{estimate_direction<poly_degree_>(points_in_the_radius,
-                                                  d.pose_.value().head(2))};
+  const auto res{
+      estimate_direction<poly_degree_>(points_in_the_radius, d.enu_.value())};
 
   estimated_direction = res.direction_;
 
@@ -578,6 +574,7 @@ BagProcessor::estimate_camera_pos(Detection &d) {
   }
 
   d.direction_ = estimated_direction;
+  d.enu_ = res.point_;
 
   return Eigen::Isometry3d{
       // Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
@@ -610,8 +607,8 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
           static_cast<double>(timestamp - gps_[ind - 1].timestamp_) /
           static_cast<double>(gps_[ind].timestamp_ - gps_[ind - 1].timestamp_)};
 
-      const Eigen::Vector3d cam_pose{gps_[ind - 1].position_ * (1.0 - t) +
-                                     gps_[ind].position_ * t};
+      const Eigen::Vector2d cam_pose{gps_[ind - 1].enu_ * (1.0 - t) +
+                                     gps_[ind].enu_ * t};
 
       const auto [points_in_the_radius, direction] =
           get_points_in_the_radius(gps_, search_radius_, cam_pose, ind);
@@ -622,8 +619,8 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
       // auto estimated_direction{
       //     estimate_direction_spline(points_in_the_radius, cam_pose.head(2))};
 
-      const auto res{estimate_direction<poly_degree_>(points_in_the_radius,
-                                                      cam_pose.head(2))};
+      const auto res{
+          estimate_direction<poly_degree_>(points_in_the_radius, cam_pose)};
 
       auto estimated_direction{res.direction_};
 
@@ -685,7 +682,7 @@ BagProcessor &BagProcessor::log_ground_truth_landmarks() {
       }
 
       colors.emplace_back(color_map[l.code_]);
-      coords.emplace_back(l.lla_.x(), l.lla_.y());
+      coords.emplace_back(l.latlon_.x(), l.latlon_.y());
 
       // log_landmark_map(l, color_map[l.code_]);
     }
@@ -723,7 +720,8 @@ BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
   if (rec_) {
 
     const Eigen::Isometry3d landmark_transf{
-        Eigen::Translation3d{landmark.position_} *
+        Eigen::Translation3d{
+            Eigen::Vector3d{landmark.enu_.x(), landmark.enu_.y(), 0.0}} *
         Eigen::AngleAxisd{-landmark.azimuth_, Eigen::Vector3d::UnitZ()}};
 
     const std::array<Eigen::Vector3d, 4> arrow{
@@ -749,10 +747,11 @@ BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
                                    {lla_arrow[2], lla_arrow[1], lla_arrow[3]})}}
             .with_colors(color));
 
-    rec_->log(entity_path, rerun::GeoPoints{{rerun::LatLon{landmark.lla_.x(),
-                                                           landmark.lla_.y()}}}
-                               .with_colors(color)
-                               .with_radii(rerun::Radius::ui_points(5.0f)));
+    rec_->log(entity_path,
+              rerun::GeoPoints{
+                  {rerun::LatLon{landmark.latlon_.x(), landmark.latlon_.y()}}}
+                  .with_colors(color)
+                  .with_radii(rerun::Radius::ui_points(5.0f)));
   }
 
   return *this;
@@ -763,8 +762,8 @@ BagProcessor &BagProcessor::log_gps_path_map() {
 
     const std::vector<rerun::DVec2D> gps_path{
         gps_ | transform([](auto &&val) {
-          return rerun::DVec2D{static_cast<float>(val.lla_.x()),
-                               static_cast<float>(val.lla_.y())};
+          return rerun::DVec2D{static_cast<float>(val.latlon_.x()),
+                               static_cast<float>(val.latlon_.y())};
         }) |
         to<std::vector>()};
 
@@ -782,8 +781,8 @@ BagProcessor &BagProcessor::log_gps_path() {
 
     const std::vector<rerun::Vec3D> gps_path{
         gps_ | transform([](auto &&val) {
-          return rerun::Vec3D{static_cast<float>(val.position_.x()),
-                              static_cast<float>(val.position_.y()), 0.0f};
+          return rerun::Vec3D{static_cast<float>(val.enu_.x()),
+                              static_cast<float>(val.enu_.y()), 0.0f};
         }) |
         to<std::vector>()};
 
@@ -884,8 +883,8 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
                      static_cast<double>(gps_[ind].timestamp_ -
                                          gps_[ind - 1].timestamp_)};
 
-        const Eigen::Vector3d cam_pose{gps_[ind - 1].position_ * (1.0 - t) +
-                                       gps_[ind].position_ * t};
+        const Eigen::Vector2d cam_pose{gps_[ind - 1].enu_ * (1.0 - t) +
+                                       gps_[ind].enu_ * t};
 
         const auto [points_in_the_radius, direction] =
             get_points_in_the_radius(gps_, search_radius_, cam_pose, ind);
@@ -1074,7 +1073,7 @@ BagProcessor &BagProcessor::log_track(size_t track_id) {
                           rerun::WidthHeight{static_cast<uint32_t>(img.cols),
                                              static_cast<uint32_t>(img.rows)}));
 
-            p = local_converter_.latlon(det.pose_->head<2>());
+            p = local_converter_.latlon(det.enu_.value());
             const rerun::LatLon lla{p.x(), p.y()};
 
             landmark_pos_map.push_back(lla);
@@ -1150,7 +1149,7 @@ BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
   return *this;
 }
 
-Landmark BagProcessor::triangulate(size_t track_id) const {
+Landmark BagProcessor::triangulate(size_t track_id) {
 
   if (image_tracks_.contains(track_id)) {
     auto l{triangulate(image_tracks_.at(track_id))};
@@ -1214,7 +1213,7 @@ std::vector<size_t> BagProcessor::get_valid_tracks() {
 
     for (auto &&d : track.dets_) {
 
-      if (not d.pose_.has_value()) {
+      if (not d.enu_.has_value()) {
         continue;
       }
 
@@ -1251,8 +1250,7 @@ std::vector<size_t> BagProcessor::get_valid_tracks() {
   return res;
 }
 
-std::optional<Landmark>
-BagProcessor::triangulate(const ImageTrack &track) const {
+std::optional<Landmark> BagProcessor::triangulate(ImageTrack &track) {
 
   if (not track.valid_) {
     return std::nullopt;
@@ -1260,6 +1258,7 @@ BagProcessor::triangulate(const ImageTrack &track) const {
 
   std::optional<Eigen::Vector2d> prev_camera_pose{};
   std::vector<TrackPoint> track_points{};
+  std::vector<size_t> selected_detections{};
 
   for (auto &&[i, d] : enumerate(track.dets_)) {
 
@@ -1283,6 +1282,7 @@ BagProcessor::triangulate(const ImageTrack &track) const {
 
     if (track.roi().contains(d.center_)) {
       track_points.push_back(track.track_point(i));
+      selected_detections.push_back(i);
     }
   }
 
@@ -1294,14 +1294,16 @@ BagProcessor::triangulate(const ImageTrack &track) const {
       return std::nullopt;
     }
 
+    track.selected_detections_ = std::move(selected_detections);
+
     Landmark l{landmark.value()};
     correct_orientation(l, gps_);
 
-    const auto latlon{local_converter_.latlon(l.position_.head<2>())};
-
-    l.lla_ = Eigen::Vector3d{latlon.x(), latlon.y(), 0.0};
+    l.latlon_ = local_converter_.latlon(l.enu_);
     l.code_ = track.code_;
     l.id_ = track.id_;
+
+    track.landmark_ = l;
 
     return l;
   } catch (std::exception &ex) {
@@ -1375,7 +1377,8 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
     nlohmann::json feature{};
     feature["type"] = "Feature";
     feature["geometry"]["type"] = "Point";
-    feature["geometry"]["coordinates"] = {landmark.lla_.y(), landmark.lla_.x()};
+    feature["geometry"]["coordinates"] = {landmark.latlon_.y(),
+                                          landmark.latlon_.x()};
     feature["properties"]["sign_id"] = landmark.code_;
     feature["properties"]["description"] = landmark.code_;
     feature["properties"]["marker-color"] = "#1e98ff";
@@ -1391,7 +1394,7 @@ void BagProcessor::save_geojson(std::span<const Landmark> landmarks,
 
   for (auto &&gps : gps_) {
     gps_track["geometry"]["coordinates"].push_back(
-        {gps.lla_.y(), gps.lla_.x()});
+        {gps.latlon_.y(), gps.latlon_.x()});
   }
 
   j["features"].push_back(gps_track);
@@ -1496,7 +1499,7 @@ void BagProcessor::change_angle(double angle_deg) {
       }
 
       d.cam_to_world_ = Eigen::Isometry3d{
-          Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
+          Eigen::Translation3d{d.enu_.value().x(), d.enu_.value().y(), 0.0f} *
           Eigen::AngleAxisd{angle_deg * boost::math::double_constants::degree,
                             Eigen::Vector3d::UnitZ()} *
           Eigen::AngleAxisd{

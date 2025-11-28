@@ -471,7 +471,7 @@ struct FeatureTracker::impl {
       const auto plane{fit_a_plane(p3d)};
 
       Landmark landmark{};
-      landmark.position_ = plane.centroid_;
+      landmark.enu_ = plane.centroid_.head<2>();
       landmark.azimuth_ = get_azimmuth(plane.normal_, timestamp_to_pose);
 
       return landmark;

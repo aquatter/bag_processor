@@ -81,7 +81,7 @@ Eigen::Vector3d triangulate_gtsam(
 
 std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
 get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
-                         Eigen::Vector3d query_point, ptrdiff_t ind) {
+                         Eigen::Vector2d query_point, ptrdiff_t ind) {
 
   const double rad_squared{rad * rad};
 
@@ -92,12 +92,11 @@ get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
   int num_added{0};
 
   for (ptrdiff_t i{ind - 1}; i >= 0; --i) {
-    if ((points[i].position_ - query_point).squaredNorm() < rad_squared or
+    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared or
         num_added < 5) {
-      points_queue.emplace_front(points[i].position_.x(),
-                                 points[i].position_.y());
+      points_queue.emplace_front(points[i].enu_.x(), points[i].enu_.y());
       ++num_added;
-      first_point = points[i].position_.head(2);
+      first_point = points[i].enu_;
     } else {
       break;
     }
@@ -105,13 +104,12 @@ get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
 
   num_added = 0;
   for (ptrdiff_t i{ind}; i < points.size(); ++i) {
-    if ((points[i].position_ - query_point).squaredNorm() < rad_squared or
+    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared or
         num_added < 5) {
-      points_queue.emplace_back(points[i].position_.x(),
-                                points[i].position_.y());
+      points_queue.emplace_back(points[i].enu_.x(), points[i].enu_.y());
 
       ++num_added;
-      last_point = points[i].position_.head(2);
+      last_point = points[i].enu_;
     } else {
       break;
     }
@@ -283,22 +281,22 @@ void correct_orientation(Landmark &landmark,
 
   auto it{ranges::min_element(
       gps_track, [&landmark](const GpsMeasurement &a, const GpsMeasurement &b) {
-        return (landmark.position_ - a.position_).squaredNorm() <
-               (landmark.position_ - b.position_).squaredNorm();
+        return (landmark.enu_ - a.enu_).squaredNorm() <
+               (landmark.enu_ - b.enu_).squaredNorm();
       })};
 
   const auto ind{std::distance(gps_track.begin(), it)};
 
   const auto [points, direction] = get_points_in_the_radius(
-      gps_track, BagProcessor::search_radius_, gps_track[ind].position_, ind);
+      gps_track, BagProcessor::search_radius_, gps_track[ind].enu_, ind);
 
-  if ((gps_track[ind].position_ - landmark.position_).squaredNorm() >
+  if ((gps_track[ind].enu_ - landmark.enu_).squaredNorm() >
       BagProcessor::max_dist_to_track_sqr_) {
     return;
   }
 
   const auto res{estimate_direction<BagProcessor::poly_degree_>(
-      points, gps_track[ind].position_.head<2>())};
+      points, gps_track[ind].enu_)};
 
   auto poly_direction{res.direction_};
 
@@ -374,15 +372,14 @@ struct Metrics::impl {
       : set_{set} {
 
     auto gt_landmarks_vec{gt_landmarks | transform([](const Landmark &val) {
-                            return std::pair{
-                                static_cast<float>(val.position_.x()),
-                                static_cast<float>(val.position_.y())};
+                            return std::pair{static_cast<float>(val.enu_.x()),
+                                             static_cast<float>(val.enu_.y())};
                           }) |
                           to<std::vector>()};
 
     auto gps_vec{gps_measurements | transform([](const GpsMeasurement &val) {
-                   return std::pair{static_cast<float>(val.position_.x()),
-                                    static_cast<float>(val.position_.y())};
+                   return std::pair{static_cast<float>(val.enu_.x()),
+                                    static_cast<float>(val.enu_.y())};
                  }) |
                  to<std::vector>()};
 
@@ -417,8 +414,8 @@ struct Metrics::impl {
 
     selected_gt_landmarks_vec_ =
         selected_gt_landmarks_ | transform([](const Landmark &val) {
-          return std::pair{static_cast<float>(val.position_.x()),
-                           static_cast<float>(val.position_.y())};
+          return std::pair{static_cast<float>(val.enu_.x()),
+                           static_cast<float>(val.enu_.y())};
         }) |
         to<std::vector>();
 
@@ -434,9 +431,8 @@ struct Metrics::impl {
   Metrics::Result eval(std::span<const Landmark> landmarks) const {
 
     auto landmarks_vec{landmarks | transform([](const Landmark &val) {
-                         return std::pair{
-                             static_cast<float>(val.position_.x()),
-                             static_cast<float>(val.position_.y())};
+                         return std::pair{static_cast<float>(val.enu_.x()),
+                                          static_cast<float>(val.enu_.y())};
                        }) |
                        to<std::vector>()};
 
@@ -489,12 +485,27 @@ struct Metrics::impl {
       res.distances_.push_back(radius);
     }
 
-    res.auc_ = 0.0f;
+    const float delta{1.0f / static_cast<float>(set_.num_steps_ - 1)};
+
+    res.precision_auc_ = 0.0f;
     for (auto &&p : res.precision_) {
-      res.auc_ += p;
+      res.precision_auc_ += p;
     }
 
-    LOG(INFO) << "AUC: " << res.auc_;
+    res.precision_auc_ -=
+        0.5f * (res.precision_.front() + res.precision_.back());
+    res.precision_auc_ *= delta;
+
+    res.recall_auc_ = 0.0f;
+    for (auto &&p : res.recall_) {
+      res.recall_auc_ += p;
+    }
+
+    res.recall_auc_ -= 0.5f * (res.recall_.front() + res.recall_.back());
+    res.recall_auc_ *= delta;
+
+    LOG(INFO) << "precision AUC: " << res.precision_auc_;
+    LOG(INFO) << "recall AUC: " << res.recall_auc_;
     return res;
   }
 
@@ -524,7 +535,8 @@ bool Metrics::Result::save(const std::string_view path,
     j["title"] = title.data();
   }
 
-  j["auc"] = auc_;
+  j["precision_auc"] = precision_auc_;
+  j["recall_auc"] = recall_auc_;
   j["precision"] = precision_;
   j["recall"] = recall_;
   j["distances"] = distances_;
@@ -588,38 +600,36 @@ void combine_landmarks(std::vector<Landmark> &landmarks,
       }
     }
 
-    Eigen::Vector3d mean_position{Eigen::Vector3d::Zero()};
+    Eigen::Vector2d mean_enu{Eigen::Vector2d::Zero()};
     double mean_azimuth{0.0};
     double norm{0.0};
 
     for (auto &&id : existing_landmarks) {
       const auto var{id_to_landmark[id]->dist_variance_};
-      mean_position += id_to_landmark[id]->position_ / var;
+      mean_enu += id_to_landmark[id]->enu_ / var;
       mean_azimuth += id_to_landmark[id]->azimuth_ / var;
       norm += 1.0 / var;
     }
 
-    mean_position /= norm;
+    mean_enu /= norm;
     mean_azimuth /= norm;
 
-    const auto mean_lla{converter.latlon(mean_position.head<2>())};
+    const auto mean_lla{converter.latlon(mean_enu)};
 
     for (auto &&id : existing_landmarks) {
-      id_to_landmark[id]->position_ = mean_position;
-      id_to_landmark[id]->lla_ =
-          Eigen::Vector3d{mean_lla.x(), mean_lla.y(), 0.0};
+      id_to_landmark[id]->enu_ = mean_enu;
+      id_to_landmark[id]->latlon_ = mean_lla;
       id_to_landmark[id]->azimuth_ = mean_azimuth;
     }
 
     for (auto &&id : landmarks_to_add) {
       const auto &track{tracks.at(id)};
-      added_landmarks.emplace_back(
-          Landmark{.id_ = track.id_,
-                   .code_ = track.code_,
-                   .position_ = mean_position,
-                   .lla_ = Eigen::Vector3d{mean_lla.x(), mean_lla.y(), 0.0},
-                   .azimuth_ = mean_azimuth,
-                   .dist_variance_ = 1.0 / norm});
+      added_landmarks.emplace_back(Landmark{.id_ = track.id_,
+                                            .code_ = track.code_,
+                                            .enu_ = mean_enu,
+                                            .latlon_ = mean_lla,
+                                            .azimuth_ = mean_azimuth,
+                                            .dist_variance_ = 1.0 / norm});
     }
   }
 

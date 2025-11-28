@@ -73,7 +73,7 @@ start_closest_poses(const ImageTrack &track1, const ImageTrack &track2) {
 
   for (auto &&[i1, d1] : track1.dets_ | enumerate) {
 
-    if (not d1.pose_.has_value()) {
+    if (not d1.enu_.has_value()) {
       continue;
     }
 
@@ -84,12 +84,11 @@ start_closest_poses(const ImageTrack &track1, const ImageTrack &track2) {
 
     for (auto &&[i2, d2] : track2.dets_ | enumerate) {
 
-      if (not d2.pose_.has_value()) {
+      if (not d2.enu_.has_value()) {
         continue;
       }
 
-      const auto dist{(d1.pose_.value().head<2>() - d2.pose_.value().head<2>())
-                          .squaredNorm()};
+      const auto dist{(d1.enu_.value() - d2.enu_.value()).squaredNorm()};
 
       if (min_dist > dist) {
         min_dist = dist;
@@ -112,7 +111,7 @@ std::tuple<size_t, size_t, double> end_closest_poses(const ImageTrack &track1,
 
   for (auto &&[i1, d1] : track1.dets_ | enumerate | reverse) {
 
-    if (not d1.pose_.has_value()) {
+    if (not d1.enu_.has_value()) {
       continue;
     }
 
@@ -123,11 +122,11 @@ std::tuple<size_t, size_t, double> end_closest_poses(const ImageTrack &track1,
 
     for (auto &&[i2, d2] : track2.dets_ | enumerate) {
 
-      if (not d2.pose_.has_value()) {
+      if (not d2.enu_.has_value()) {
         continue;
       }
 
-      const auto dist{(d1.pose_.value() - d2.pose_.value()).squaredNorm()};
+      const auto dist{(d1.enu_.value() - d2.enu_.value()).squaredNorm()};
       if (min_dist > dist) {
         min_dist = dist;
         min_ind = i2;
@@ -148,11 +147,11 @@ size_t find_closest_index(Eigen::Vector2d p0, const ImageTrack &track) {
 
   for (auto &&[i, d] : track.dets_ | enumerate) {
 
-    if (not d.pose_.has_value()) {
+    if (not d.enu_.has_value()) {
       continue;
     }
 
-    const auto dist{(d.pose_.value().head<2>() - p0).squaredNorm()};
+    const auto dist{(d.enu_.value() - p0).squaredNorm()};
 
     if (min_dist > dist) {
       min_dist = dist;
@@ -168,17 +167,17 @@ find_closest_indices_both_direction(size_t index1, const ImageTrack &track1,
                                     const ImageTrack &track2) {
 
   const auto index2{
-      find_closest_index(track1.dets_[index1].pose_.value().head<2>(), track2)};
+      find_closest_index(track1.dets_[index1].enu_.value(), track2)};
 
-  const auto dist1{(track1.dets_[index1].pose_.value().head<2>() -
-                    track2.dets_[index2].pose_.value().head<2>())
-                       .squaredNorm()};
+  const auto dist1{
+      (track1.dets_[index1].enu_.value() - track2.dets_[index2].enu_.value())
+          .squaredNorm()};
 
   const auto index1_prime{
-      find_closest_index(track2.dets_[index2].pose_.value().head<2>(), track1)};
+      find_closest_index(track2.dets_[index2].enu_.value(), track1)};
 
-  const auto dist2{(track1.dets_[index1_prime].pose_.value().head<2>() -
-                    track2.dets_[index2].pose_.value().head<2>())
+  const auto dist2{(track1.dets_[index1_prime].enu_.value() -
+                    track2.dets_[index2].enu_.value())
                        .squaredNorm()};
 
   if (dist1 < dist2) {
@@ -228,8 +227,8 @@ start_end_indices(const ImageTrack &track1, const ImageTrack &track2,
 
   auto [s1, e1] = ranges::minmax(track1_dets);
 
-  auto p1{track1.dets_[s1].pose_.value()};
-  auto p2{track1.dets_[e1].pose_.value()};
+  auto p1{track1.dets_[s1].enu_.value()};
+  auto p2{track1.dets_[e1].enu_.value()};
 
   double min_dist1{std::numeric_limits<double>::max()};
   double min_dist2{std::numeric_limits<double>::max()};
@@ -237,14 +236,12 @@ start_end_indices(const ImageTrack &track1, const ImageTrack &track2,
   size_t e2{0};
 
   for (auto &&[i, d] : enumerate(track2.dets_)) {
-    if (not d.pose_.has_value()) {
+    if (not d.enu_.has_value()) {
       continue;
     }
 
-    const double dist1{
-        (d.pose_.value().head<2>() - p1.head<2>()).squaredNorm()};
-    const double dist2{
-        (d.pose_.value().head<2>() - p2.head<2>()).squaredNorm()};
+    const double dist1{(d.enu_.value() - p1).squaredNorm()};
+    const double dist2{(d.enu_.value() - p2).squaredNorm()};
 
     if (dist1 < min_dist1) {
       min_dist1 = dist1;
@@ -260,18 +257,16 @@ start_end_indices(const ImageTrack &track1, const ImageTrack &track2,
   min_dist1 = std::numeric_limits<double>::max();
   min_dist2 = std::numeric_limits<double>::max();
 
-  p1 = track2.dets_[s2].pose_.value();
-  p2 = track2.dets_[e2].pose_.value();
+  p1 = track2.dets_[s2].enu_.value();
+  p2 = track2.dets_[e2].enu_.value();
 
   for (auto &&[i, d] : enumerate(track1.dets_)) {
-    if (not d.pose_.has_value()) {
+    if (not d.enu_.has_value()) {
       continue;
     }
 
-    const double dist1{
-        (d.pose_.value().head<2>() - p1.head<2>()).squaredNorm()};
-    const double dist2{
-        (d.pose_.value().head<2>() - p2.head<2>()).squaredNorm()};
+    const double dist1{(d.enu_.value() - p1).squaredNorm()};
+    const double dist2{(d.enu_.value() - p2).squaredNorm()};
 
     if (dist1 < min_dist1) {
       min_dist1 = dist1;
@@ -351,7 +346,7 @@ bool TracksCollection::should_be_linked(
     for (auto &d : this_timestamp_dets) {
       if (d->code_ == src_track.code_) {
 
-        if (d->pose_.has_value()) {
+        if (d->enu_.has_value()) {
           auto dst_center{d->center_undistorted_};
 
           const auto dist{cv::norm(Vec2f{dst_center}, cv::Vec2f{src_center})};
@@ -405,8 +400,7 @@ bool should_be_linked(const GroupedDetections::map_type &dst_detections,
     if (num_detections > 1) {
 
       auto src_center{find_closest_center(
-          track_dst.dets_[track_dst_det_ind].pose_.value().head<2>(),
-          track_src)};
+          track_dst.dets_[track_dst_det_ind].enu_.value(), track_src)};
 
       src_center.x *= norm_w2;
       src_center.y *= norm_h2;
@@ -473,12 +467,11 @@ public:
 
         for (auto &&[det_ind, d] : enumerate(track.dets_)) {
 
-          if (not d.pose_.has_value()) {
+          if (not d.enu_.has_value()) {
             continue;
           }
 
-          points_.emplace_back(bag_ind, track_id, det_ind,
-                               d.pose_.value().head<2>());
+          points_.emplace_back(bag_ind, track_id, det_ind, d.enu_.value());
         }
       }
     }
@@ -501,7 +494,7 @@ public:
 
     for (auto &&[i, d] : enumerate(track.dets_)) {
 
-      if (not d.pose_.has_value()) {
+      if (not d.enu_.has_value()) {
         continue;
       }
 
@@ -509,10 +502,9 @@ public:
     }
 
     auto query_data{track.dets_ |
-                    filter([](const auto &d) { return d.pose_.has_value(); }) |
+                    filter([](const auto &d) { return d.enu_.has_value(); }) |
                     transform([](const auto &d) {
-                      return std::pair{d.pose_.value().x(),
-                                       d.pose_.value().y()};
+                      return std::pair{d.enu_.value().x(), d.enu_.value().y()};
                     }) |
                     to<std::vector>()};
 
@@ -581,14 +573,14 @@ void TracksCollection::recalculate_coords(BagProcessor::ptr bag) {
   for (auto &&[track_id, track] : bag->image_tracks_) {
     for (auto &&d : track.dets_) {
 
-      if (not d.pose_.has_value()) {
+      if (not d.enu_.has_value()) {
         continue;
       }
 
-      const Eigen::Vector2d enu{converter_.enu(
-          bag->local_converter_.latlon(d.pose_.value().head<2>()))};
+      const Eigen::Vector2d enu{
+          converter_.enu(bag->local_converter_.latlon(d.enu_.value()))};
 
-      d.pose_ = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+      d.enu_ = enu;
       d.cam_to_world_->translation() = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
     }
 
@@ -596,13 +588,11 @@ void TracksCollection::recalculate_coords(BagProcessor::ptr bag) {
   }
 
   for (auto &&gps : bag->gps_) {
-    const auto enu{converter_.enu(gps.lla_.head<2>())};
-    gps.position_ = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+    gps.enu_ = converter_.enu(gps.latlon_);
   }
 
   for (auto &&landmark : bag->found_landmarks_) {
-    const auto enu{converter_.enu(landmark.lla_.head<2>())};
-    landmark.position_ = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+    landmark.enu_ = converter_.enu(landmark.latlon_);
   }
 }
 

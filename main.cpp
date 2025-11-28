@@ -53,14 +53,14 @@ int main(const int argc, const char *const *argv) {
   nglog::InstallPrefixFormatter(&LogFormatter);
   FLAGS_stderrthreshold = 0;
 
-  constexpr static std::string_view file_name{"video20250831-125017"};
-  constexpr static std::string_view folder_name{"domodedovo/video_domodedovo"};
+  constexpr static std::string_view file_name{"GX010004"};
+  constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
 
   auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
   rec->connect_grpc().exit_on_failure();
 
   try {
-#if 1
+#if 0
     {
 
       auto bag_proc1{
@@ -111,10 +111,11 @@ int main(const int argc, const char *const *argv) {
                                   file_name.data()),
          .annotations_path_ = fmt::format("/root/data/{}/detections_{}.json",
                                           folder_name.data(), file_name.data()),
+         .calibration_path_ =
+             "/root/data/calibration_gopro13_05_11/GX010005-camchain.yaml",
          //  .calibration_path_ =
-         //      "/root/data/calibration_gopro13_05_11/GX010005-camchain.yaml",
-         .calibration_path_ = "/root/data/domodedovo/video_domodedovo/calib/"
-                              "VID_20250929_134020-camchain.yaml",
+         //  "/root/data/domodedovo/video_domodedovo/calib/"
+         //                       "VID_20250929_134020-camchain.yaml",
          //  "/root/data/calibration_gopro_15_10/results/"
          // "wide_stab_on-camchain.yaml",
          //  "/root/data/calib_bmi160_1204x768_29_09/"
@@ -122,14 +123,16 @@ int main(const int argc, const char *const *argv) {
          //  "/root/data/calibration_20_08/imu_camera_20_08-camchain.yaml",
          .ground_truth_path_ =
              fmt::format("/root/data/{}/gt.geojson", folder_name.data()),
-         //  .correction_angle_ = 4.0,
-         .correction_angle_ = 0.0,
-         .camera_gps_delta_ = 1'300'000'000l,
-         //  .camera_gps_delta_ = 0l,
+         .correction_angle_ = 4.0,
+         //  .correction_angle_ = 0.0,
+         //  .camera_gps_delta_ = 1'300'000'000l,
+         .camera_gps_delta_ = 0l,
          .use_klt_ = false,
          .use_logger_ = true,
-         //  .session_name_ = "gopro_01_11"
-         .session_name_ = "video_gps"}};
+         .session_name_ = "gopro_01_11",
+         //  .session_name_ = "video_gps",
+         .compressed_image_topic_ = "/camera/image_raw/compressed",
+         .gps_topic_ = "/fix"}};
 
     LOG(INFO) << "Bag processor initialized";
 
@@ -139,65 +142,6 @@ int main(const int argc, const char *const *argv) {
 
     bag_proc.save(fmt::format("/root/data/{}/archive.bin", folder_name));
 
-    // const int64_t from_timestamp{1755767829610259789 - 2 * 1'000'000'000l};
-    // const int64_t to_timestamp{from_timestamp + 2 * 1'000'000'000l};
-
-    // const auto found_landmarks{bag_proc.triangulate_tracks()};
-
-    // bag_proc.log_gps_path_map();
-    // .log_landmarks_map(found_landmarks)
-    // .save_geojson(found_landmarks,
-    //               fmt::format("/root/data/{}/{}.geojson",
-    //                           folder_name.data(), file_name.data()));
-
-    // .log_track(338);
-    // .log_landmarks_map(found_landmarks);
-
-    // .log_gps_path()
-    // .log_axis()
-    // .log_camera(168215094333)
-    // .log_poly(168215094333)
-    // .log_images(168215094333, 168215094333);
-    // .log_landmarks_map(found_landmarks)
-    // .save_geojson(found_landmarks,
-    //               fmt::format("/root/data/{}/{}.geojson",
-    //                           folder_name.data(), file_name.data()));
-
-    // .log_ground_truth_landmarks(bag_proc.most_frequent_landmark())
-    // .log_track("3.1_148")
-    // .log_images(from_timestamp, to_timestamp);
-
-    // for (auto &&landmark : found_landmarks) {
-    //   if (landmark.code_ == bag_proc.most_frequent_landmark()) {
-    //     Landmark l{landmark};
-    //     l.code_ += "__detected";
-    //     bag_proc.log_landmark_map(l, {0, 255, 0});
-    //   }
-    // }
-
-    // .log_ground_truth_landmarks()
-    // .log_track("3.27_43")
-    // .log_gps_path()
-    // .log_axis()
-    // .log_track_directions("3.27_43", 150.0f);
-
-    // .log_landmarks_map(found_landmarks)
-
-    // bag_proc.log_axis().log_gps_path_map();
-    // bag_proc.log_axis().log_gps_path().log_poly(1756128239494864977);
-
-    // bag_proc.log_axis().log_gps_path().log_images(from_timestamp,
-    // to_timestamp); .log_track("3.27_116");
-
-    // .log_direction("8.1.1_37", 1755768830363105351, 30.0f);
-
-    // .log_track("8.1.1_37");
-    // .log_poly(1755768834763552351)
-
-    // .log_poly(1755768834405726351);
-    // .log_camera(1755768834405726351);
-    // bag_proc.log_images(from_timestamp, to_timestamp);
-    /// world/camera_1755768834405726351
   } catch (const std::exception &ex) {
     LOG(ERROR) << ex.what();
   }

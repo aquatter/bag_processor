@@ -23,16 +23,16 @@ void log_track_map(std::shared_ptr<rerun::RecordingStream> rec,
   const GeographicLib::LocalCartesian converter{
       track.geodetic_origin_.x(), track.geodetic_origin_.y(), 0.0};
 
-  const auto path{
-      track.dets_ | filter([](auto &&p) { return p.pose_.has_value(); }) |
-      transform([&converter](auto &&p) {
-        Eigen::Vector3d lla{Eigen::Vector3d::Zero()};
-        converter.Reverse(p.pose_.value().x(), p.pose_.value().y(),
-                          p.pose_.value().z(), lla.x(), lla.y(), lla.z());
+  const auto path{track.dets_ |
+                  filter([](auto &&p) { return p.enu_.has_value(); }) |
+                  transform([&converter](auto &&p) {
+                    Eigen::Vector3d lla{Eigen::Vector3d::Zero()};
+                    converter.Reverse(p.enu_.value().x(), p.enu_.value().y(),
+                                      0.0, lla.x(), lla.y(), lla.z());
 
-        return rerun::DVec2D{lla.x(), lla.y()};
-      }) |
-      to<std::vector>()};
+                    return rerun::DVec2D{lla.x(), lla.y()};
+                  }) |
+                  to<std::vector>()};
 
   rec->log(fmt::format("map/{}_{}", track.name_, track.id_),
            rerun::GeoLineStrings{
@@ -67,17 +67,14 @@ void log_segment(std::shared_ptr<rerun::RecordingStream> rec,
   const GeographicLib::LocalCartesian converter2{
       track2.geodetic_origin_.x(), track2.geodetic_origin_.y(), 0.0};
 
-  const auto pose0{track1.dets_[index1].pose_.value()};
-  const auto pose1{track2.dets_[index2].pose_.value()};
+  const auto pose0{track1.dets_[index1].enu_.value()};
+  const auto pose1{track2.dets_[index2].enu_.value()};
 
   Eigen::Vector3d lla0{Eigen::Vector3d::Zero()};
   Eigen::Vector3d lla1{Eigen::Vector3d::Zero()};
 
-  converter1.Reverse(pose0.x(), pose0.y(), pose0.z(), lla0.x(), lla0.y(),
-                     lla0.z());
-
-  converter2.Reverse(pose1.x(), pose1.y(), pose1.z(), lla1.x(), lla1.y(),
-                     lla1.z());
+  converter1.Reverse(pose0.x(), pose0.y(), 0.0, lla0.x(), lla0.y(), lla0.z());
+  converter2.Reverse(pose1.x(), pose1.y(), 0.0, lla1.x(), lla1.y(), lla1.z());
 
   log_segment(fmt::format("map/segment_{}_{}", track1.name_, track2.name_), rec,
               {lla0.x(), lla0.y()}, {lla1.x(), lla1.y()});
@@ -93,30 +90,20 @@ void log_start_end_segments(std::shared_ptr<rerun::RecordingStream> rec,
   const GeographicLib::LocalCartesian converter{
       track1.geodetic_origin_.x(), track1.geodetic_origin_.y(), 0.0};
 
-  const auto pose0{track1.dets_[start1].pose_.value()};
-
-  const auto pose1{track2.dets_[start2].pose_.value()};
-
-  const auto pose2{track1.dets_[end1].pose_.value()};
-
-  const auto pose3{track2.dets_[end2].pose_.value()};
+  const auto pose0{track1.dets_[start1].enu_.value()};
+  const auto pose1{track2.dets_[start2].enu_.value()};
+  const auto pose2{track1.dets_[end1].enu_.value()};
+  const auto pose3{track2.dets_[end2].enu_.value()};
 
   Eigen::Vector3d lla0{Eigen::Vector3d::Zero()};
   Eigen::Vector3d lla1{Eigen::Vector3d::Zero()};
   Eigen::Vector3d lla2{Eigen::Vector3d::Zero()};
   Eigen::Vector3d lla3{Eigen::Vector3d::Zero()};
 
-  converter.Reverse(pose0.x(), pose0.y(), pose0.z(), lla0.x(), lla0.y(),
-                    lla0.z());
-
-  converter.Reverse(pose1.x(), pose1.y(), pose1.z(), lla1.x(), lla1.y(),
-                    lla1.z());
-
-  converter.Reverse(pose2.x(), pose2.y(), pose2.z(), lla2.x(), lla2.y(),
-                    lla2.z());
-
-  converter.Reverse(pose3.x(), pose3.y(), pose3.z(), lla3.x(), lla3.y(),
-                    lla3.z());
+  converter.Reverse(pose0.x(), pose0.y(), 0.0, lla0.x(), lla0.y(), lla0.z());
+  converter.Reverse(pose1.x(), pose1.y(), 0.0, lla1.x(), lla1.y(), lla1.z());
+  converter.Reverse(pose2.x(), pose2.y(), 0.0, lla2.x(), lla2.y(), lla2.z());
+  converter.Reverse(pose3.x(), pose3.y(), 0.0, lla3.x(), lla3.y(), lla3.z());
 
   log_segment(fmt::format("map/start_{}_{}", track1.name_, track2.name_), rec,
               {lla0.x(), lla0.y()}, {lla1.x(), lla1.y()});
@@ -139,7 +126,7 @@ void log_detection(std::shared_ptr<rerun::RecordingStream> rec,
 
   const Eigen::Isometry3d transf{
       Eigen::Translation3d{
-          Eigen::Vector3d{det.pose_.value().x(), det.pose_.value().y(), 0.0}} *
+          Eigen::Vector3d{det.enu_.value().x(), det.enu_.value().y(), 0.0}} *
       Eigen::AngleAxisd{-angle, Eigen::Vector3d::UnitZ()}};
 
   const std::vector<rerun::DVec2D> lla_arrow{

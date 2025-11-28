@@ -31,9 +31,10 @@ struct BagProcessorSettings {
   bool use_klt_;
   bool use_logger_;
   std::string session_name_;
+  std::string compressed_image_topic_;
+  std::string gps_topic_;
 
-  template <typename Archive>
-  void serialize(Archive &ar, const unsigned int version) {
+  template <typename Archive> void serialize(Archive &ar, const uint32_t) {
     ar & bag_path_;
     ar & annotations_path_;
     ar & calibration_path_;
@@ -43,6 +44,8 @@ struct BagProcessorSettings {
     ar & use_klt_;
     ar & use_logger_;
     ar & session_name_;
+    ar & compressed_image_topic_;
+    ar & gps_topic_;
   }
 };
 
@@ -81,7 +84,7 @@ public:
 
   BagProcessor &log_images(int64_t from, int64_t to);
 
-  Landmark triangulate(size_t track_id) const;
+  Landmark triangulate(size_t track_id);
   std::vector<Landmark> triangulate_tracks();
 
   void save_geojson(std::span<const Landmark> landmarks,
@@ -112,7 +115,7 @@ private:
   cv::Mat_<cv::Vec3b> load_image(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(Detection &d);
-  std::optional<Landmark> triangulate(const ImageTrack &track) const;
+  std::optional<Landmark> triangulate(ImageTrack &track);
   void collect_detections();
   void track_features();
   void change_angle(double angle_deg);

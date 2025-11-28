@@ -176,7 +176,7 @@ triangulate_on_boxes(std::span<const TrackPoint> track) {
     const auto plane{fit_a_plane(p3d)};
 
     Landmark landmark{};
-    landmark.position_ = plane.centroid_;
+    landmark.enu_ = plane.centroid_.head<2>();
     landmark.azimuth_ = get_azimmuth(plane.normal_, track);
     landmark.dist_variance_ = calculate_variance(total_distances);
 

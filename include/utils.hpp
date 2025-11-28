@@ -21,7 +21,7 @@ Eigen::Vector3d triangulate_gtsam(
 
 std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
 get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
-                         Eigen::Vector3d query_point, ptrdiff_t ind);
+                         Eigen::Vector2d query_point, ptrdiff_t ind);
 
 std::vector<rerun::Vec3D>
 interpolate_spline(std::span<const Eigen::Vector2d> points,
@@ -170,7 +170,8 @@ public:
     std::vector<float> precision_;
     std::vector<float> recall_;
     std::vector<float> distances_;
-    float auc_;
+    float precision_auc_;
+    float recall_auc_;
 
     bool save(const std::string_view path,
               const std::string_view title = {}) const;
