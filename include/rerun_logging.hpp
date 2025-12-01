@@ -23,3 +23,6 @@ void log_start_end_segments(std::shared_ptr<rerun::RecordingStream> rec,
 
 void log_detection(std::shared_ptr<rerun::RecordingStream> rec,
                    const ImageTrack &track, size_t index);
+
+void log_landmark(std::shared_ptr<rerun::RecordingStream> rec,
+                  const Landmark &landmark, rerun::Color color);

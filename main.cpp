@@ -1,17 +1,13 @@
-#include "bag_loader.hpp"
 #include <Eigen/Core>
-
 #include <bag_processor.hpp>
 #include <cstdlib>
 #include <fmt/color.h>
 #include <fmt/format.h>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <opencv2/core/matx.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
-#include <optional>
 #include <rclcpp/node.hpp>
 #include <rclcpp/publisher.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -20,6 +16,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <serialization.hpp>
 #include <tracks_collecton.hpp>
+#include <unordered_set>
 
 void LogFormatter(std::ostream &s, const nglog::LogMessage &m, void *) {
 
@@ -53,8 +50,11 @@ int main(const int argc, const char *const *argv) {
   nglog::InstallPrefixFormatter(&LogFormatter);
   FLAGS_stderrthreshold = 0;
 
-  constexpr static std::string_view file_name{"GX010004"};
-  constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
+  // constexpr static std::string_view file_name{"GX010004"};
+  // constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
+
+  constexpr static std::string_view file_name{"video20250831-125017"};
+  constexpr static std::string_view folder_name{"domodedovo/video_domodedovo"};
 
   auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
   rec->connect_grpc().exit_on_failure();
@@ -111,11 +111,10 @@ int main(const int argc, const char *const *argv) {
                                   file_name.data()),
          .annotations_path_ = fmt::format("/root/data/{}/detections_{}.json",
                                           folder_name.data(), file_name.data()),
-         .calibration_path_ =
-             "/root/data/calibration_gopro13_05_11/GX010005-camchain.yaml",
          //  .calibration_path_ =
-         //  "/root/data/domodedovo/video_domodedovo/calib/"
-         //                       "VID_20250929_134020-camchain.yaml",
+         //      "/root/data/calibration_gopro13_05_11/GX010005-camchain.yaml",
+         .calibration_path_ = "/root/data/domodedovo/video_domodedovo/calib/"
+                              "VID_20250929_134020-camchain.yaml",
          //  "/root/data/calibration_gopro_15_10/results/"
          // "wide_stab_on-camchain.yaml",
          //  "/root/data/calib_bmi160_1204x768_29_09/"
@@ -123,14 +122,14 @@ int main(const int argc, const char *const *argv) {
          //  "/root/data/calibration_20_08/imu_camera_20_08-camchain.yaml",
          .ground_truth_path_ =
              fmt::format("/root/data/{}/gt.geojson", folder_name.data()),
-         .correction_angle_ = 4.0,
-         //  .correction_angle_ = 0.0,
-         //  .camera_gps_delta_ = 1'300'000'000l,
-         .camera_gps_delta_ = 0l,
+         //  .correction_angle_ = 4.0,
+         .correction_angle_ = 0.0,
+         .camera_gps_delta_ = 1'300'000'000l,
+         //  .camera_gps_delta_ = 0l,
          .use_klt_ = false,
          .use_logger_ = true,
-         .session_name_ = "gopro_01_11",
-         //  .session_name_ = "video_gps",
+         //  .session_name_ = "gopro_01_11",
+         .session_name_ = "video_gps",
          .compressed_image_topic_ = "/camera/image_raw/compressed",
          .gps_topic_ = "/fix"}};
 

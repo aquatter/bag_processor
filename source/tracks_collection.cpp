@@ -21,6 +21,7 @@
 #include <rerun_logging.hpp>
 #include <span>
 #include <tracks_collecton.hpp>
+#include <triangulation.hpp>
 #include <types.hpp>
 #include <unordered_map>
 #include <unordered_set>
@@ -282,6 +283,19 @@ start_end_indices(const ImageTrack &track1, const ImageTrack &track2,
   return {s1, e1, s2, e2};
 }
 
+struct MinMaxAccumulator {
+
+  void add(double val) noexcept {
+    min_ = std::min(min_, val);
+    max_ = std::max(max_, val);
+  }
+
+  double delta() const noexcept { return max_ - min_; }
+
+  double min_{std::numeric_limits<double>::max()};
+  double max_{std::numeric_limits<double>::min()};
+};
+
 bool TracksCollection::should_be_linked(
     size_t bag_index, size_t track_id,
     const std::unordered_set<size_t> &det_ind, BagProcessor::ptr src_bag,
@@ -292,6 +306,8 @@ bool TracksCollection::should_be_linked(
   const auto &dst_dets{dst_track.dets_};
   const auto &src_track{src_bag->image_tracks_.at(src_bag_id)};
   const auto &src_dets{src_track.dets_};
+  MinMaxAccumulator dst_minmax{};
+  MinMaxAccumulator src_minmax{};
 
 #if 0
   BagLoader dst_loader{BagLoader::Settings{
@@ -306,12 +322,24 @@ bool TracksCollection::should_be_linked(
       .timestamp_delta_ = src_bag->set_.camera_gps_delta_,
       .rec_ = {}}};
 
+#endif
   {
     log_track_map(rec_, src_track, {255, 0, 0});
     log_track_map(rec_, dst_track, {0, 255, 0});
-  }
 
-#endif
+    if (not src_track.landmark_.has_value()) {
+      [[maybe_unused]] auto p{
+          triangulate_on_boxes(src_track.selected_track_points())};
+    }
+
+    if (src_track.landmark_.has_value()) {
+      log_landmark(rec_, src_track.landmark_.value(), {255, 0, 0});
+    }
+
+    if (dst_track.landmark_.has_value()) {
+      log_landmark(rec_, dst_track.landmark_.value(), {0, 255, 0});
+    }
+  }
 
   // int not_closest_num{0};
 
@@ -322,18 +350,21 @@ bool TracksCollection::should_be_linked(
     const auto [dst_ind, src_ind] =
         find_closest_indices_both_direction(dst_det_ind, dst_track, src_track);
 
+    dst_minmax.add(dst_track.dets_[dst_ind].cumulative_length_);
+    src_minmax.add(src_track.dets_[src_ind].cumulative_length_);
+
     const auto &this_timestamp_dets{
         dst_bag->image_detections_.at(dst_dets[dst_ind].timestamp_).dets_};
-#if 0
     {
-      dst_loader.dump_detection("/root/data/images/dst.png", dst_dets[dst_ind]);
-      src_loader.dump_detection("/root/data/images/src.png", src_dets[src_ind]);
-
       log_segment(rec_, src_track, dst_track, src_ind, dst_ind);
       log_detection(rec_, src_track, src_ind);
       log_detection(rec_, dst_track, dst_ind);
-    }
+#if 0
+      dst_loader.dump_detection("/root/data/images/dst.png", dst_dets[dst_ind]);
+      src_loader.dump_detection("/root/data/images/src.png", src_dets[src_ind]);
+
 #endif
+    }
 
     const auto src_center{src_track.dets_[src_ind].center_undistorted_};
 
@@ -368,7 +399,25 @@ bool TracksCollection::should_be_linked(
           [](const auto &a, const auto &b) { return a.second < b.second; })
           ->first};
 
-  return track_with_max_hits == track_id;
+  const auto dst_length_ratio{dst_minmax.delta() / dst_track.length_};
+  const auto src_length_ratio{src_minmax.delta() / src_track.length_};
+
+  const bool track_intersection{dst_length_ratio >= 0.7 or
+                                src_length_ratio >= 0.7};
+
+  const bool closest_detection{track_with_max_hits == track_id};
+
+  bool landmark_proximity{false};
+
+  if (src_track.landmark_.has_value()) {
+    if (landmarks_.contain({bag_index, track_id})) {
+      landmark_proximity = ((landmarks_.at({bag_index, track_id}).enu_ -
+                             src_track.landmark_->enu_)
+                                .norm() < 5.0);
+    }
+  }
+
+  return (closest_detection or landmark_proximity) and track_intersection;
 }
 
 bool should_be_linked(const GroupedDetections::map_type &dst_detections,
@@ -566,6 +615,18 @@ private:
 void TracksCollection::init(BagProcessor::ptr bag) {
   converter_ = bag->local_converter_;
   bags_.push_back(bag);
+
+  for (auto &&[track_id, track] : bag->image_tracks_) {
+    if (not track.valid_) {
+      continue;
+    }
+
+    if (not track.landmark_.has_value()) {
+      continue;
+    }
+
+    landmarks_.add({0, track_id}, track.landmark_.value());
+  }
 }
 
 void TracksCollection::recalculate_coords(BagProcessor::ptr bag) {
@@ -584,15 +645,15 @@ void TracksCollection::recalculate_coords(BagProcessor::ptr bag) {
       d.cam_to_world_->translation() = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
     }
 
+    if (track.landmark_.has_value()) {
+      track.landmark_->enu_ = converter_.enu(track.landmark_->latlon_);
+    }
+
     track.geodetic_origin_ = converter_.origin();
   }
 
   for (auto &&gps : bag->gps_) {
     gps.enu_ = converter_.enu(gps.latlon_);
-  }
-
-  for (auto &&landmark : bag->found_landmarks_) {
-    landmark.enu_ = converter_.enu(landmark.latlon_);
   }
 }
 

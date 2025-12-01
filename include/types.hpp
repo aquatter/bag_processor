@@ -130,7 +130,6 @@ struct TrackPoint {
 
 struct Landmark {
   size_t id_;
-  std::unordered_set<size_t> parent_tracks_;
   std::string code_;
   Eigen::Vector2d enu_;
   Eigen::Vector2d latlon_;
@@ -139,7 +138,6 @@ struct Landmark {
 
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & id_;
-    ar & parent_tracks_;
     ar & code_;
     ar & enu_;
     ar & latlon_;
@@ -175,6 +173,7 @@ struct ImageTrack {
   void link(ImageTrack &d);
 
   TrackPoint track_point(size_t i) const;
+  std::vector<TrackPoint> selected_track_points() const;
 
   [[nodiscard]] cv::Rect roi() const noexcept {
     return {roi_border_, roi_border_,

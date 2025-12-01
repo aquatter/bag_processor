@@ -94,6 +94,9 @@ void BagProcessor::calculate() {
   load_calibration(set_.calibration_path_);
   calib_.print();
 
+  load_ground_truth_landmarks(set_.ground_truth_path_);
+  calculate_most_frequent_landmark();
+
   load_tracks();
   collect_detections();
   link_detections(image_detections_);
@@ -103,23 +106,25 @@ void BagProcessor::calculate() {
   valid_tracks_ = get_valid_tracks();
   LOG(INFO) << "num valid tracks: " << valid_tracks_.size();
 
-  found_landmarks_ = triangulate_tracks();
+  LOG(INFO) << "Num triangulated landmarks: " << triangulate_tracks();
 
-  LOG(INFO) << "Num triangulated landmarks: " << found_landmarks_.size();
+  calculate_metrics();
 
-  combine_landmarks(found_landmarks_, image_tracks_, local_converter_);
+  LOG(INFO) << "Num combined landmarks: "
+            << combine_landmarks(image_tracks_, local_converter_);
 
-  LOG(INFO) << "Num combined landmarks: " << found_landmarks_.size();
+  calculate_metrics();
 }
 
-void BagProcessor::calculate_metrics(std::filesystem::path path) {
-  load_ground_truth_landmarks(set_.ground_truth_path_);
-  calculate_most_frequent_landmark();
+void BagProcessor::calculate_metrics(
+    std::optional<std::filesystem::path> path) {
 
   const Metrics metrics{Metrics::Settings{}, gps_, ground_truth_landmarks_};
-  auto res{metrics.eval(found_landmarks_)};
+  auto res{metrics.eval(image_tracks_)};
 
-  res.save(path.string(), set_.session_name_);
+  if (path.has_value()) {
+    res.save(path->string(), set_.session_name_);
+  }
 }
 
 void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
@@ -134,23 +139,20 @@ void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
   for (auto &&angle : linear_distribute(from, to, num)) {
     change_angle(angle);
 
-    auto found_landmarks{triangulate_tracks()};
-    combine_landmarks(found_landmarks, image_tracks_, local_converter_);
+    triangulate_tracks();
+    combine_landmarks(image_tracks_, local_converter_);
 
-    auto res{metrics.eval(found_landmarks)};
+    auto res{metrics.eval(image_tracks_)};
 
     if (max_auc < res.precision_auc_) {
       max_auc = res.precision_auc_;
       best_result = std::move(res);
       best_angle = angle;
-      best_landmarks = std::move(found_landmarks);
     }
   }
 
   LOG(INFO) << "Best angle: " << best_angle;
   LOG(INFO) << "Best auc: " << max_auc;
-
-  found_landmarks_ = std::move(best_landmarks);
 }
 
 void BagProcessor::collect_detections() {
@@ -1149,40 +1151,23 @@ BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
   return *this;
 }
 
-Landmark BagProcessor::triangulate(size_t track_id) {
+size_t BagProcessor::triangulate_tracks() {
 
-  if (image_tracks_.contains(track_id)) {
-    auto l{triangulate(image_tracks_.at(track_id))};
-
-    if (l.has_value()) {
-      return l.value();
-    }
-
-    LOG(WARNING) << "unable to triangulate track " << track_id;
-    return {};
-  }
-
-  LOG(WARNING) << "unable to find track " << track_id;
-  return {};
-}
-
-std::vector<Landmark> BagProcessor::triangulate_tracks() {
-
-  std::vector<Landmark> res{};
+  size_t num_triangulated{0};
 
   for (auto &&track_id : valid_tracks_) {
 
-    auto l{triangulate(image_tracks_.at(track_id))};
+    triangulate(image_tracks_.at(track_id));
 
-    if (l.has_value()) {
-      res.emplace_back(l.value());
-    } else {
+    if (not image_tracks_.at(track_id).landmark_.has_value()) {
       LOG(WARNING) << "unable to triangulate track " << track_id;
+    } else {
+      ++num_triangulated;
     }
   }
 
-  LOG(INFO) << "num triangulated tracks: " << res.size();
-  return res;
+  LOG(INFO) << "num triangulated tracks: " << num_triangulated;
+  return num_triangulated;
 }
 
 float BagProcessor::estimate_azimuth(const Eigen::Isometry3d pose,
@@ -1250,10 +1235,10 @@ std::vector<size_t> BagProcessor::get_valid_tracks() {
   return res;
 }
 
-std::optional<Landmark> BagProcessor::triangulate(ImageTrack &track) {
+void BagProcessor::triangulate(ImageTrack &track) {
 
   if (not track.valid_) {
-    return std::nullopt;
+    return;
   }
 
   std::optional<Eigen::Vector2d> prev_camera_pose{};
@@ -1286,15 +1271,16 @@ std::optional<Landmark> BagProcessor::triangulate(ImageTrack &track) {
     }
   }
 
+  track.selected_detections_ = std::move(selected_detections);
+
   try {
     auto landmark{triangulate_on_boxes(track_points)};
 
     if (not landmark.has_value()) {
+      track.valid_ = false;
       LOG(WARNING) << "unable to triangulate landmark: " << track.id_;
-      return std::nullopt;
+      return;
     }
-
-    track.selected_detections_ = std::move(selected_detections);
 
     Landmark l{landmark.value()};
     correct_orientation(l, gps_);
@@ -1305,12 +1291,9 @@ std::optional<Landmark> BagProcessor::triangulate(ImageTrack &track) {
 
     track.landmark_ = l;
 
-    return l;
   } catch (std::exception &ex) {
     LOG(ERROR) << ex.what() << "track id: " << track.id_;
   }
-
-  return std::nullopt;
 }
 
 BagProcessor &BagProcessor::log_track_directions(size_t track_id,

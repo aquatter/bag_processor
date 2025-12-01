@@ -1,9 +1,12 @@
+#include "rerun.hpp"
+#include "rerun/archetypes/geo_points.hpp"
 #include <Eigen/Core>
 #include <Eigen/src/Core/Matrix.h>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <boost/math/constants/constants.hpp>
 #include <cartesian_converter.hpp>
 #include <cmath>
+#include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <range/v3/range/conversion.hpp>
@@ -16,6 +19,7 @@
 using ranges::to;
 using ranges::views::filter;
 using ranges::views::transform;
+using namespace rerun;
 
 void log_track_map(std::shared_ptr<rerun::RecordingStream> rec,
                    const ImageTrack &track, rerun::Color color) {
@@ -151,6 +155,17 @@ void log_detection(std::shared_ptr<rerun::RecordingStream> rec,
   rec->log(entity_path, rerun::GeoPoints{{rerun::LatLon{lla_arrow[0]}}}
                             .with_colors(rerun::Color{0, 255, 0})
                             .with_radii(rerun::Radius::ui_points(5.0f)));
+
+  [[maybe_unused]] const auto err{rec->flush_blocking()};
+}
+
+void log_landmark(std::shared_ptr<rerun::RecordingStream> rec,
+                  const Landmark &landmark, Color color) {
+
+  rec->log(fmt::format("map/{}_{}", landmark.code_, landmark.id_),
+           GeoPoints{{LatLon{landmark.latlon_.x(), landmark.latlon_.y()}}}
+               .with_colors(color)
+               .with_radii(Radius::ui_points(2.0f)));
 
   [[maybe_unused]] const auto err{rec->flush_blocking()};
 }

@@ -16,12 +16,14 @@
 #include <ng-log/logging.h>
 #include <nlohmann/json.hpp>
 #include <range/v3/algorithm/copy.hpp>
+#include <range/v3/algorithm/count_if.hpp>
 #include <range/v3/algorithm/find_if.hpp>
 #include <range/v3/algorithm/max.hpp>
 #include <range/v3/algorithm/min_element.hpp>
 #include <range/v3/algorithm/sort.hpp>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/filter.hpp>
 #include <range/v3/view/iota.hpp>
 #include <range/v3/view/linear_distribute.hpp>
 #include <range/v3/view/take.hpp>
@@ -38,6 +40,7 @@
 
 using ranges::to;
 using ranges::views::enumerate;
+using ranges::views::filter;
 using ranges::views::ints;
 using ranges::views::linear_distribute;
 using ranges::views::transform;
@@ -428,13 +431,19 @@ struct Metrics::impl {
     index_->buildIndex();
   }
 
-  Metrics::Result eval(std::span<const Landmark> landmarks) const {
+  Metrics::Result eval(const ImageTrack::map_type &tracks) const {
 
-    auto landmarks_vec{landmarks | transform([](const Landmark &val) {
-                         return std::pair{static_cast<float>(val.enu_.x()),
-                                          static_cast<float>(val.enu_.y())};
-                       }) |
-                       to<std::vector>()};
+    std::vector<size_t> filtered_ids{};
+
+    auto landmarks_vec{
+        tracks |
+        filter([](auto &&val) { return val.second.landmark_.has_value(); }) |
+        transform([&filtered_ids](const auto &val) {
+          filtered_ids.push_back(val.first);
+          return std::pair{static_cast<float>(val.second.landmark_->enu_.x()),
+                           static_cast<float>(val.second.landmark_->enu_.y())};
+        }) |
+        to<std::vector>()};
 
     const flann::Matrix<float> query_dataset{&landmarks_vec.front().first,
                                              landmarks_vec.size(), 2ul};
@@ -462,7 +471,7 @@ struct Metrics::impl {
         for (auto &&[i, d] : zip(ind, dist)) {
 
           if ((not taken.contains(selected_gt_landmarks_[i].id_)) and
-              landmarks[landmark_ind].code_ ==
+              tracks.at(filtered_ids[landmark_ind]).landmark_->code_ ==
                   selected_gt_landmarks_[i].code_) {
 
             taken.insert(selected_gt_landmarks_[i].id_);
@@ -521,8 +530,8 @@ Metrics::Metrics(const Settings &set,
                  std::span<const Landmark> gt_landmarks)
     : pimpl_{std::make_unique<impl>(set, gps_measurements, gt_landmarks)} {}
 
-Metrics::Result Metrics::eval(std::span<const Landmark> landmarks) const {
-  return pimpl_->eval(landmarks);
+Metrics::Result Metrics::eval(const ImageTrack::map_type &tracks) const {
+  return pimpl_->eval(tracks);
 }
 
 Metrics::~Metrics() = default;
@@ -551,52 +560,45 @@ bool Metrics::Result::save(const std::string_view path,
   return false;
 }
 
-void combine_landmarks(std::vector<Landmark> &landmarks,
-                       const ImageTrack::map_type &tracks,
-                       const CartesianConverter &converter) {
+size_t combine_landmarks(ImageTrack::map_type &tracks,
+                         const CartesianConverter &converter) {
 
-  std::unordered_map<size_t, Landmark *> id_to_landmark{};
+  std::unordered_set<size_t> processed_tracks{};
 
-  for (auto &&landmark : landmarks) {
-    id_to_landmark[landmark.id_] = &landmark;
-  }
+  for (auto &&[track_id, track] : tracks) {
 
-  std::vector<Landmark> added_landmarks{};
-  std::unordered_set<size_t> processed_landmarks{};
+    if (not track.landmark_.has_value()) {
+      continue;
+    }
 
-  for (auto &&landmark : landmarks) {
-
-    if (processed_landmarks.contains(landmark.id_)) {
+    if (processed_tracks.contains(track_id)) {
       continue;
     }
 
     std::deque<size_t> q{};
-    q.push_back(landmark.id_);
-    processed_landmarks.insert(landmark.id_);
+    q.push_back(track_id);
+    processed_tracks.insert(track_id);
 
-    std::unordered_set<size_t> existing_landmarks{};
-    std::unordered_set<size_t> landmarks_to_add{};
-
-    existing_landmarks.insert(landmark.id_);
+    std::unordered_set<size_t> defined_landmarks{};
+    std::unordered_set<size_t> undefined_landmarks{};
 
     while (not q.empty()) {
       const auto id{q.front()};
       q.pop_front();
 
-      if (not id_to_landmark.contains(id)) {
-        landmarks_to_add.insert(id);
+      if (not tracks.at(id).landmark_.has_value()) {
+        undefined_landmarks.insert(id);
       } else {
-        existing_landmarks.insert(id);
+        defined_landmarks.insert(id);
       }
 
       for (auto &&linked_id : tracks.at(id).linked_tracks_) {
-
-        if (processed_landmarks.contains(linked_id)) {
+        if (processed_tracks.contains(linked_id)) {
           continue;
         }
 
         q.push_back(linked_id);
-        processed_landmarks.insert(linked_id);
+        processed_tracks.insert(linked_id);
       }
     }
 
@@ -604,35 +606,37 @@ void combine_landmarks(std::vector<Landmark> &landmarks,
     double mean_azimuth{0.0};
     double norm{0.0};
 
-    for (auto &&id : existing_landmarks) {
-      const auto var{id_to_landmark[id]->dist_variance_};
-      mean_enu += id_to_landmark[id]->enu_ / var;
-      mean_azimuth += id_to_landmark[id]->azimuth_ / var;
+    for (auto &&id : defined_landmarks) {
+      const auto var{tracks.at(id).landmark_->dist_variance_};
+      mean_enu += tracks.at(id).landmark_->enu_ / var;
+      mean_azimuth += tracks.at(id).landmark_->azimuth_ / var;
       norm += 1.0 / var;
     }
 
-    mean_enu /= norm;
-    mean_azimuth /= norm;
+    const double dist_variance{1.0 / norm};
+
+    mean_enu *= dist_variance;
+    mean_azimuth *= dist_variance;
 
     const auto mean_lla{converter.latlon(mean_enu)};
 
-    for (auto &&id : existing_landmarks) {
-      id_to_landmark[id]->enu_ = mean_enu;
-      id_to_landmark[id]->latlon_ = mean_lla;
-      id_to_landmark[id]->azimuth_ = mean_azimuth;
+    for (auto &&id : defined_landmarks) {
+      tracks.at(id).landmark_->enu_ = mean_enu;
+      tracks.at(id).landmark_->latlon_ = mean_lla;
+      tracks.at(id).landmark_->azimuth_ = mean_azimuth;
+      tracks.at(id).landmark_->dist_variance_ = dist_variance;
     }
 
-    for (auto &&id : landmarks_to_add) {
-      const auto &track{tracks.at(id)};
-      added_landmarks.emplace_back(Landmark{.id_ = track.id_,
-                                            .code_ = track.code_,
-                                            .enu_ = mean_enu,
-                                            .latlon_ = mean_lla,
-                                            .azimuth_ = mean_azimuth,
-                                            .dist_variance_ = 1.0 / norm});
+    for (auto &&id : undefined_landmarks) {
+      tracks.at(id).landmark_ = Landmark{.id_ = tracks.at(id).id_,
+                                         .code_ = tracks.at(id).code_,
+                                         .enu_ = mean_enu,
+                                         .latlon_ = mean_lla,
+                                         .azimuth_ = mean_azimuth,
+                                         .dist_variance_ = dist_variance};
     }
   }
 
-  landmarks.insert(landmarks.end(), added_landmarks.begin(),
-                   added_landmarks.end());
+  return ranges::count_if(
+      tracks, [](auto &&val) { return val.second.landmark_.has_value(); });
 }

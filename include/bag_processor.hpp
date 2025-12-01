@@ -60,7 +60,8 @@ public:
   BagProcessor(const BagProcessorSettings &set);
 
   void calculate();
-  void calculate_metrics(std::filesystem::path path);
+  void
+  calculate_metrics(std::optional<std::filesystem::path> path = std::nullopt);
 
   void optimize_angle(double from, double to, ptrdiff_t num);
 
@@ -84,8 +85,7 @@ public:
 
   BagProcessor &log_images(int64_t from, int64_t to);
 
-  Landmark triangulate(size_t track_id);
-  std::vector<Landmark> triangulate_tracks();
+  size_t triangulate_tracks();
 
   void save_geojson(std::span<const Landmark> landmarks,
                     const std::string_view path) const;
@@ -115,7 +115,7 @@ private:
   cv::Mat_<cv::Vec3b> load_image(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(Detection &d);
-  std::optional<Landmark> triangulate(ImageTrack &track);
+  void triangulate(ImageTrack &track);
   void collect_detections();
   void track_features();
   void change_angle(double angle_deg);
@@ -135,7 +135,6 @@ private:
 
   std::vector<size_t> valid_tracks_;
   size_t track_num_;
-  std::vector<Landmark> found_landmarks_;
   CalibrationDesc calib_;
 
   friend class TrackIndexer;
@@ -151,7 +150,6 @@ private:
     ar & most_frequent_landmark_;
     ar & valid_tracks_;
     ar & track_num_;
-    ar & found_landmarks_;
     ar & calib_;
     ar & local_converter_;
 

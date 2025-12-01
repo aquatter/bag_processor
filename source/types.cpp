@@ -10,6 +10,8 @@
 #include <opencv2/core/types.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <range/v3/range/conversion.hpp>
+#include <range/v3/view/transform.hpp>
 #include <stdexcept>
 #include <types.hpp>
 #include <unordered_set>
@@ -19,6 +21,8 @@ using boost::math::float_constants::degree;
 using boost::math::float_constants::pi;
 using boost::math::float_constants::radian;
 using boost::math::float_constants::two_pi;
+using ranges::to;
+using ranges::views::transform;
 
 template <typename F> class Accumulator {
 public:
@@ -198,6 +202,12 @@ TrackPoint ImageTrack::track_point(size_t i) const {
                     .pose_ = dets_[i].cam_to_world_.value(),
                     .angle_ = dets_[i].angle_,
                     .calib_ = calib_};
+}
+
+std::vector<TrackPoint> ImageTrack::selected_track_points() const {
+  return selected_detections_ |
+         transform([this](auto &&i) { return track_point(i); }) |
+         to<std::vector>();
 }
 
 cv::Point2f CalibrationDesc::undistort_point(const cv::Point2f &p) const {

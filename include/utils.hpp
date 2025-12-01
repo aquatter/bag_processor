@@ -39,9 +39,8 @@ void link_detections(ImageDetections::map_type &detections);
 void link_tracks(ImageTrack::map_type &tracks,
                  ImageDetections::map_type &detections);
 
-void combine_landmarks(std::vector<Landmark> &landmarks,
-                       const ImageTrack::map_type &tracks,
-                       const CartesianConverter &converter);
+size_t combine_landmarks(ImageTrack::map_type &tracks,
+                         const CartesianConverter &converter);
 
 template <int degree> struct PolyResult {
   Eigen::Vector2d point_;
@@ -180,7 +179,7 @@ public:
   Metrics(const Settings &set, std::span<const GpsMeasurement> gps_measurements,
           std::span<const Landmark> gt_landmarks);
 
-  [[nodiscard]] Result eval(std::span<const Landmark> landmarks) const;
+  [[nodiscard]] Result eval(const ImageTrack::map_type &tracks) const;
 
   ~Metrics();
 
