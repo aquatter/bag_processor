@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Geometry>
+#include <Eigen/src/Core/Matrix.h>
 #include <boost/math/constants/constants.hpp>
 #include <cartesian_converter.hpp>
 #include <cstddef>
@@ -90,25 +91,26 @@ public:
   void save_geojson(std::span<const Landmark> landmarks,
                     const std::string_view path) const;
 
-  std::string most_frequent_landmark() const;
-
   void save(std::filesystem::path path) const;
 
   [[nodiscard]] static BagProcessor::ptr load(std::filesystem::path path);
 
   void set_rerun(std::shared_ptr<rerun::RecordingStream> rec) { rec_ = rec; }
 
-  ImageTrack::map_type get_tracks() const;
-
   const BagProcessorSettings &settings() const { return set_; }
+
+  size_t num_valid_tracks() const;
 
 private:
   void load_calibration(const std::string_view path);
   void load_tracks();
   void load_measurements(const std::string_view path);
-  void load_ground_truth_landmarks(const std::string_view path);
+
+  std::vector<Landmark>
+  load_ground_truth_landmarks(const std::string_view path);
+
   void load_detections(const std::string_view path);
-  void calculate_most_frequent_landmark();
+
   float estimate_azimuth(const Eigen::Isometry3d pose,
                          const Eigen::Vector2f p2d) const;
 
@@ -120,21 +122,18 @@ private:
   void track_features();
   void change_angle(double angle_deg);
 
-  std::vector<size_t> get_valid_tracks();
+  size_t select_valid_tracks();
 
   BagProcessorSettings set_;
   std::shared_ptr<rerun::RecordingStream> rec_;
   std::unordered_map<size_t, ImageTrack> image_tracks_;
   std::vector<CameraMeasurement> camera_;
   std::vector<GpsMeasurement> gps_;
+  std::vector<GpsMeasurement> stable_gps_;
   std::unordered_map<int64_t, ImageDetections> image_detections_;
   CartesianConverter local_converter_;
-  std::vector<Landmark> ground_truth_landmarks_;
-  std::string most_frequent_landmark_;
   std::unordered_map<std::string, cv::Scalar> color_map_;
 
-  std::vector<size_t> valid_tracks_;
-  size_t track_num_;
   CalibrationDesc calib_;
 
   friend class TrackIndexer;
@@ -144,13 +143,10 @@ private:
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & set_;
     ar & image_tracks_;
-    ar & camera_;
     ar & gps_;
-    ar & ground_truth_landmarks_;
-    ar & most_frequent_landmark_;
-    ar & valid_tracks_;
-    ar & track_num_;
+    ar & stable_gps_;
     ar & calib_;
+    ar & camera_;
     ar & local_converter_;
 
     if (Archive::is_loading::value) {
@@ -160,10 +156,12 @@ private:
 
 public:
   static constexpr int poly_degree_{3};
-  static constexpr double search_radius_{20.0};
+  static constexpr double search_radius_{10.0};
   static constexpr double dist_threshold_squared_{0.3 * 0.3};
   static constexpr float angle_threshold_deg_{20.0f};
   static constexpr double max_dist_to_track_sqr_{15.0 * 15.0};
   static constexpr double azimuth_correction_threshold_{
       45.0 * boost::math::double_constants::degree};
+
+  // bool log_poly_{false};
 };

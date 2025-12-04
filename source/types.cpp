@@ -5,6 +5,7 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <limits>
+#include <ng-log/logging.h>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/core/types.hpp>
@@ -174,10 +175,10 @@ bool ImageTrack::should_be_linked(const ImageTrack &track) const {
   const bool res{length_criteria and angle_criteria};
 
   if (res) {
-    fmt::print(
-        "\e[38;2;154;205;50mlinked track\e[0m \e[38;2;255;127;80m{}\e[0m "
-        "\e[38;2;154;205;50mwith\e[0m \e[38;2;255;127;80m{}\e[0m\n",
-        id_, track.id_);
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "{}:{}", id_, code_)
+              << fmt::format(fmt::fg(fmt::color::yellow_green), " -> ")
+              << fmt::format(fmt::fg(fmt::color::coral), "{}:{}", track.id_,
+                             track.code_);
   }
 
   return res;
@@ -230,12 +231,12 @@ CalibrationDesc::undistort_image(cv::Mat_<cv::Vec3b> image) const {
 
 void CalibrationDesc::print() const noexcept {
   fmt::print(fmt::fg(fmt::color::green_yellow), "\nCamera resolution:\n");
-  fmt::print(fmt::fg(fmt::color::orange_red), "{} x {}\n",
+  fmt::print(fmt::fg(fmt::color::orange_red), "{} x {}\n\n",
              camera_resolution_.x(), camera_resolution_.y());
   fmt::print(fmt::fg(fmt::color::green_yellow), "Camera intrinsics gtsam:\n");
   cal3_s2_.print("");
-  fmt::print(fmt::fg(fmt::color::green_yellow), "Camera matrix opencv:\n");
+  fmt::print(fmt::fg(fmt::color::green_yellow), "\nCamera matrix opencv:\n");
   std::cout << camera_matrix_ << "\n";
-  fmt::print(fmt::fg(fmt::color::green_yellow), "Distortion coefficients:\n");
+  fmt::print(fmt::fg(fmt::color::green_yellow), "\nDistortion coefficients:\n");
   std::cout << dist_coeffs_ << "\n\n";
 }

@@ -6,10 +6,18 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <flann/flann.hpp>
+#include <fmt/color.h>
+#include <fmt/core.h>
 #include <limits>
+#include <memory>
+#include <ng-log/logging.h>
+#include <opencv2/core/types.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <optional>
+#include <queue>
 #include <range/v3/algorithm/max.hpp>
 #include <range/v3/algorithm/minmax.hpp>
 #include <range/v3/range/conversion.hpp>
@@ -18,6 +26,7 @@
 #include <range/v3/view/reverse.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#include <rerun.hpp>
 #include <rerun_logging.hpp>
 #include <span>
 #include <tracks_collecton.hpp>
@@ -296,18 +305,107 @@ struct MinMaxAccumulator {
   double max_{std::numeric_limits<double>::min()};
 };
 
-bool TracksCollection::should_be_linked(
-    size_t bag_index, size_t track_id,
-    const std::unordered_set<size_t> &det_ind, BagProcessor::ptr src_bag,
-    size_t src_bag_id) const {
+bool TracksCollection::should_be_linked(CombinedLandmarks::Link dst_link,
+                                        std::span<const size_t> det_ind,
+                                        size_t src_track_id) {
 
-  auto dst_bag{bags_[bag_index]};
-  const auto &dst_track{dst_bag->image_tracks_.at(track_id)};
+  auto dst_bag{bags_[dst_link.bag_ind_]};
+  const auto &dst_track{dst_bag->image_tracks_.at(dst_link.track_id_)};
   const auto &dst_dets{dst_track.dets_};
-  const auto &src_track{src_bag->image_tracks_.at(src_bag_id)};
+  const auto &src_track{bags_.back()->image_tracks_.at(src_track_id)};
   const auto &src_dets{src_track.dets_};
+
   MinMaxAccumulator dst_minmax{};
   MinMaxAccumulator src_minmax{};
+
+  if (not check_proximity(dst_link, src_track)) {
+    return false;
+  }
+
+  if (not check_closest_box_and_intersecton(dst_link, det_ind, src_track_id)) {
+    return false;
+  }
+
+  auto landmark{try_link(dst_link, src_track)};
+
+  if (landmark.has_value()) {
+
+#if 0
+    if (src_track_id == 98 or src_track_id == 99) {
+      BagLoader src_loader{BagLoader::Settings{
+          .compressed_image_topic_ = bags_.back()->set_.compressed_image_topic_,
+          .path_to_bag_ = bags_.back()->set_.bag_path_,
+          .timestamp_delta_ = bags_.back()->set_.camera_gps_delta_,
+          .rec_ = {}}};
+
+      const auto src_det_ind{src_dets.size() >> 1};
+
+      src_loader.dump_detection(
+          fmt::format("/root/data/images/{}_src.png", src_track_id),
+          src_track.dets_[src_det_ind]);
+
+      BagLoader dst_loader{BagLoader::Settings{
+          .compressed_image_topic_ = dst_bag->set_.compressed_image_topic_,
+          .path_to_bag_ = dst_bag->set_.bag_path_,
+          .timestamp_delta_ = dst_bag->set_.camera_gps_delta_,
+          .rec_ = {}}};
+
+      const auto dst_det_ind{dst_dets.size() >> 1};
+
+      dst_loader.dump_detection(
+          fmt::format("/root/data/images/{}_dst.png", dst_link.track_id_),
+          dst_track.dets_[dst_det_ind]);
+    }
+#endif
+
+    // if (landmark->dist_variance_ < landmarks_.at(dst_link).dist_variance_)
+    {
+#if 0
+      landmark->latlon_ = converter_.latlon(landmark->enu_);
+      landmark->code_ = landmarks_.at(dst_link).code_;
+      landmark->id_ = landmarks_.at(dst_link).id_ + src_track.id_;
+
+      log_track_map(rec_, src_track, {255, 0, 0});
+      log_track_map(rec_, dst_track, {0, 255, 0});
+
+      log_landmark(rec_, src_track.landmark_.value(), {255, 0, 0});
+      log_landmark(rec_, dst_track.landmark_.value(), {0, 255, 0});
+      log_landmark(rec_, landmark.value(), {0, 0, 255}, 4.0f);
+
+      log_segment(fmt::format("link_{}", src_track.landmark_.value().id_), rec_,
+                  rerun::LatLon{src_track.landmark_.value().latlon_.x(),
+                                src_track.landmark_.value().latlon_.y()},
+                  rerun::LatLon{landmark.value().latlon_.x(),
+                                landmark.value().latlon_.y()});
+
+      log_segment(fmt::format("link_{}", dst_track.landmark_.value().id_), rec_,
+                  rerun::LatLon{dst_track.landmark_.value().latlon_.x(),
+                                dst_track.landmark_.value().latlon_.y()},
+                  rerun::LatLon{landmark.value().latlon_.x(),
+                                landmark.value().latlon_.y()});
+#endif
+      std::string msg{};
+
+      for (auto &&[bag_ind, track_id] : landmarks_.linked_bags(dst_link)) {
+
+        msg = fmt::format("{} {}:{}:{}", msg, bag_ind, track_id,
+                          bags_[bag_ind]->image_tracks_.at(track_id).code_);
+      }
+
+      landmarks_.at(dst_link) = landmark.value();
+      landmarks_.link({bags_.size() - 1, src_track_id}, dst_link);
+
+      LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "linked ")
+                << fmt::format(fmt::fg(fmt::color::light_green), "{}:{}",
+                               src_track.id_, src_track.code_)
+                << " ->"
+                << fmt::format(fmt::fg(fmt::color::light_green), "{}", msg);
+
+      return true;
+    }
+  }
+
+  return false;
 
 #if 0
   BagLoader dst_loader{BagLoader::Settings{
@@ -322,10 +420,9 @@ bool TracksCollection::should_be_linked(
       .timestamp_delta_ = src_bag->set_.camera_gps_delta_,
       .rec_ = {}}};
 
-#endif
+
+
   {
-    log_track_map(rec_, src_track, {255, 0, 0});
-    log_track_map(rec_, dst_track, {0, 255, 0});
 
     if (not src_track.landmark_.has_value()) {
       [[maybe_unused]] auto p{
@@ -405,19 +502,20 @@ bool TracksCollection::should_be_linked(
   const bool track_intersection{dst_length_ratio >= 0.7 or
                                 src_length_ratio >= 0.7};
 
-  const bool closest_detection{track_with_max_hits == track_id};
+  const bool closest_detection{track_with_max_hits == dst_link.track_id_};
 
   bool landmark_proximity{false};
 
   if (src_track.landmark_.has_value()) {
-    if (landmarks_.contain({bag_index, track_id})) {
-      landmark_proximity = ((landmarks_.at({bag_index, track_id}).enu_ -
-                             src_track.landmark_->enu_)
-                                .norm() < 5.0);
+    if (landmarks_.contain(dst_link)) {
+      landmark_proximity =
+          ((landmarks_.at(dst_link).enu_ - src_track.landmark_->enu_).norm() <
+           5.0);
     }
   }
 
   return (closest_detection or landmark_proximity) and track_intersection;
+#endif
 }
 
 bool should_be_linked(const GroupedDetections::map_type &dst_detections,
@@ -483,15 +581,15 @@ bool should_be_linked(const GroupedDetections::map_type &dst_detections,
   return true;
 }
 
-struct GeoPoint {
-  size_t bag_index_;
-  size_t track_id_;
-  size_t detection_index_;
-  Eigen::Vector2d enu_;
-};
-
 class TrackIndexer {
 public:
+  struct GeoPoint {
+    size_t bag_index_;
+    size_t track_id_;
+    size_t detection_index_;
+    Eigen::Vector2d enu_;
+  };
+
   struct Result {
 
     struct Bag {
@@ -505,7 +603,12 @@ public:
     std::unordered_map<size_t, Bag> bags_;
   };
 
-  TrackIndexer(std::span<const BagProcessor::ptr> bags)
+  struct FlattenedResult {
+    CombinedLandmarks::Link link_;
+    std::vector<size_t> dets_;
+  };
+
+  TrackIndexer(const std::vector<BagProcessor::ptr> &bags)
       : bags_{bags}, indexer_{flann::KDTreeSingleIndexParams{}} {
 
     for (auto &&[bag_ind, bag] : bags_ | enumerate) {
@@ -536,7 +639,7 @@ public:
     indexer_.buildIndex(dataset);
   }
 
-  Result find(const ImageTrack &track) {
+  std::vector<FlattenedResult> find(const ImageTrack &track) {
 
     std::vector<size_t> other_track_indices{};
     other_track_indices.reserve(track.dets_.size());
@@ -594,7 +697,20 @@ public:
       }
     }
 
-    return found_tracks;
+    std::vector<FlattenedResult> res{};
+
+    for (auto &&[bag_ind, bag] : found_tracks.bags_) {
+      for (auto &&[track_id, track_] : bag.tracks_) {
+
+        FlattenedResult r{.link_ = {bag_ind, track_id},
+                          .dets_ = {track_.dets_.begin(), track_.dets_.end()}};
+
+        std::sort(r.dets_.begin(), r.dets_.end());
+        res.push_back(std::move(r));
+      }
+    }
+
+    return res;
   }
 
 private:
@@ -604,7 +720,7 @@ private:
         .dets_[points_[i].detection_index_];
   }
 
-  std::span<const BagProcessor::ptr> bags_;
+  const std::vector<BagProcessor::ptr> &bags_;
   flann::Index<flann::L2_Simple<double>> indexer_;
   std::vector<GeoPoint> points_;
   static constexpr float search_rad_sqr_{15.0f * 15.0f};
@@ -642,7 +758,10 @@ void TracksCollection::recalculate_coords(BagProcessor::ptr bag) {
           converter_.enu(bag->local_converter_.latlon(d.enu_.value()))};
 
       d.enu_ = enu;
-      d.cam_to_world_->translation() = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+
+      if (d.cam_to_world_.has_value()) {
+        d.cam_to_world_->translation() = Eigen::Vector3d{enu.x(), enu.y(), 0.0};
+      }
     }
 
     if (track.landmark_.has_value()) {
@@ -665,11 +784,16 @@ void TracksCollection::merge(BagProcessor::ptr bag) {
   }
 
   recalculate_coords(bag);
-
   TrackIndexer indexer_{bags_};
+
+  bags_.push_back(bag);
 
   std::unordered_map<size_t, std::vector<size_t>> should_be_added{};
   ImageTrack::map_type other_tracks_copy{};
+
+  const auto num_valid_tracks{bag->num_valid_tracks()};
+  size_t num_track{0};
+  std::vector<size_t> affected_landmarks{};
 
   for (auto &&[track_id, track] : bag->image_tracks_) {
 
@@ -677,68 +801,305 @@ void TracksCollection::merge(BagProcessor::ptr bag) {
       continue;
     }
 
+    ++num_track;
+    LOG(INFO) << fmt::format("track {}/{}", num_track, num_valid_tracks);
+
     const auto found_tracks{indexer_.find(track)};
 
-    for (auto &&[bag_ind_, bag_] : found_tracks.bags_) {
-      for (auto &&[track_ind_, track_] : bag_.tracks_) {
-        should_be_linked(bag_ind_, track_ind_, track_.dets_, bag, track_id);
-      }
-    }
-  }
-
-#if 0 
-  for (auto &&[other_track_id, other_track] : other_tracks) {
-
-    ImageTrack track_copy{other_track};
-    recalculate_coords(track_copy);
-
-    const auto found_tracks{indexer_.query(track_copy)};
-
     if (found_tracks.empty()) {
-      should_be_added[other_track_id] = {};
+      landmarks_.add({bags_.size() - 1, track_id}, track.landmark_.value());
+
+      LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "added ")
+                << fmt::format(fmt::fg(fmt::color::light_green), "{}:{}",
+                               track_id, track.code_);
+      continue;
     }
 
-    for (auto &&[track_id, dets_ind] : found_tracks) {
-      if (should_be_linked(image_detections, tracks_.at(track_id), track_copy,
-                           dets_ind)) {
-        should_be_added[other_track_id].push_back(track_id);
+    for (auto &&res : found_tracks) {
+      if (should_be_linked(res.link_, res.dets_, track_id)) {
+        affected_landmarks.push_back(landmarks_.landmark_index(res.link_));
+        break;
+      }
+    }
+  }
+
+  combine_landmarks(affected_landmarks);
+
+  log_current_state();
+}
+
+void TracksCollection::combine_landmarks(
+    std::span<const size_t> affected_landmarks) {
+
+  std::unordered_set<size_t> processed_landmarks{};
+
+  for (auto &&landmark_ind : affected_landmarks) {
+
+    if (processed_landmarks.contains(landmark_ind)) {
+      continue;
+    }
+
+    std::unordered_set<size_t> landmarks_to_combine{};
+
+    std::deque<size_t> q{};
+    q.push_back(landmark_ind);
+    processed_landmarks.insert(landmark_ind);
+    landmarks_to_combine.insert(landmark_ind);
+
+    while (not q.empty()) {
+      const auto id{q.front()};
+      q.pop_front();
+
+      const auto links{landmarks_.linked_bags(id)};
+
+      for (auto &&[bag_ind, track_id] : links) {
+
+        std::deque<size_t> q2{};
+        std::unordered_set<size_t> processed_tracks{};
+
+        q2.push_back(track_id);
+        processed_tracks.insert(track_id);
+
+        while (not q2.empty()) {
+
+          const auto id{q2.front()};
+          q2.pop_front();
+
+          for (auto &&linked_id :
+               bags_[bag_ind]->image_tracks_.at(id).linked_tracks_) {
+
+            if (processed_tracks.contains(linked_id)) {
+              continue;
+            }
+
+            q2.push_back(linked_id);
+            processed_tracks.insert(linked_id);
+
+            if (landmarks_.contain({bag_ind, linked_id})) {
+              const auto index{landmarks_.landmark_index({bag_ind, linked_id})};
+
+              if (processed_landmarks.contains(index)) {
+                continue;
+              }
+
+              landmarks_to_combine.insert(index);
+              processed_landmarks.insert(index);
+              q.push_back(index);
+            }
+          }
+        }
       }
     }
 
-    if (should_be_added.contains(other_track_id)) {
-      other_tracks_copy[other_track_id] = std::move(track_copy);
-    }
-  }
+    if (landmarks_to_combine.size() > 1) {
 
-  std::unordered_map<size_t, size_t> id_remapping;
+      Eigen::Vector2d mean_enu{Eigen::Vector2d::Zero()};
+      double mean_azimuth{0.0};
+      double norm{0.0};
 
-  for (auto &&[other_track_id, other_track] : other_tracks_copy) {
+      for (auto &&id : landmarks_to_combine) {
+        const auto var{landmarks_.landmarks_[id].dist_variance_};
+        mean_enu += landmarks_.landmarks_[id].enu_ / var;
+        mean_azimuth += landmarks_.landmarks_[id].azimuth_ / var;
+        norm += 1.0 / var;
+      }
 
-    id_remapping[other_track_id] = last_track_id_;
-    other_track.id_ = last_track_id_;
-    tracks_[last_track_id_] = std::move(other_track);
-    ++last_track_id_;
-  }
+      const double dist_variance{1.0 / norm};
+      mean_enu *= dist_variance;
+      mean_azimuth *= dist_variance;
 
-  for (auto &&[other_track_id, ids_to_link] : should_be_added) {
+      const auto mean_lla{converter_.latlon(mean_enu)};
 
-    std::unordered_set<size_t> linked_ids{};
-
-    for (auto &&linked_id :
-         tracks_[id_remapping[other_track_id]].linked_tracks_) {
-
-      if (id_remapping.contains(linked_id)) {
-        linked_ids.insert(id_remapping[linked_id]);
+      for (auto &&id : landmarks_to_combine) {
+        landmarks_.landmarks_[id].enu_ = mean_enu;
+        landmarks_.landmarks_[id].latlon_ = mean_lla;
+        landmarks_.landmarks_[id].azimuth_ = mean_azimuth;
+        landmarks_.landmarks_[id].dist_variance_ = dist_variance;
       }
     }
+  }
+}
 
-    for (auto &&id_to_link : ids_to_link) {
-      linked_ids.insert(id_to_link);
-      tracks_[id_to_link].linked_tracks_.insert(id_remapping[other_track_id]);
+std::optional<Landmark>
+TracksCollection::try_link(CombinedLandmarks::Link link,
+                           const ImageTrack &new_track) const {
+
+  if (not landmarks_.contain(link)) {
+    return std::nullopt;
+  }
+
+  std::vector<TrackPoint> track_points{};
+
+  for (auto &&[bag_ind, track_id] : landmarks_.linked_bags(link)) {
+    const auto track_points_{
+        bags_[bag_ind]->image_tracks_.at(track_id).selected_track_points()};
+
+    track_points.insert(track_points.end(), track_points_.begin(),
+                        track_points_.end());
+  }
+
+  {
+    const auto track_points_{new_track.selected_track_points()};
+    track_points.insert(track_points.end(), track_points_.begin(),
+                        track_points_.end());
+  }
+
+  return triangulate_on_boxes(track_points);
+}
+
+bool TracksCollection::check_proximity(CombinedLandmarks::Link link,
+                                       const ImageTrack &track) const {
+
+  if (not landmarks_.contain(link)) {
+    return false;
+  }
+
+  if (not track.landmark_.has_value()) {
+    return false;
+  }
+
+  return (landmarks_.at(link).enu_ - track.landmark_->enu_).norm() < 20.0;
+}
+
+bool TracksCollection::check_closest_box_and_intersecton(
+    CombinedLandmarks::Link dst_link, std::span<const size_t> det_ind,
+    size_t src_track_id) const {
+
+  auto dst_bag{bags_[dst_link.bag_ind_]};
+  const auto &dst_track{dst_bag->image_tracks_.at(dst_link.track_id_)};
+  const auto &dst_dets{dst_track.dets_};
+  const auto &src_track{bags_.back()->image_tracks_.at(src_track_id)};
+  const auto &src_dets{src_track.dets_};
+
+  MinMaxAccumulator dst_minmax{};
+  MinMaxAccumulator src_minmax{};
+
+  // std::shared_ptr<BagLoader> dst_loader{};
+  // std::unordered_map<size_t, size_t> num_hits{};
+
+  std::unordered_set<std::pair<size_t, size_t>, decltype([](const auto &p) {
+                       size_t seed{0};
+                       boost::hash_combine(seed, p.first);
+                       boost::hash_combine(seed, p.second);
+                       return seed;
+                     })>
+      taken{};
+
+  for (auto &&dst_det_ind : det_ind) {
+
+    const auto [dst_ind, src_ind] =
+        find_closest_indices_both_direction(dst_det_ind, dst_track, src_track);
+
+    if (taken.contains({src_ind, dst_ind})) {
+      continue;
     }
 
-    tracks_[id_remapping[other_track_id]].linked_tracks_ =
-        std::move(linked_ids);
-  }
+    taken.insert({src_ind, dst_ind});
+
+#if 0
+    {
+      if ((src_track_id == 98 or src_track_id == 99) and
+          dst_link.track_id_ == 80) {
+
+        dst_loader = std::make_shared<BagLoader>(BagLoader::Settings{
+            .compressed_image_topic_ = dst_bag->set_.compressed_image_topic_,
+            .path_to_bag_ = dst_bag->set_.bag_path_,
+            .timestamp_delta_ = dst_bag->set_.camera_gps_delta_,
+            .rec_ = {}});
+
+        auto img = dst_loader->load_image(dst_dets[dst_ind].timestamp_ -
+                                          dst_bag->set_.camera_gps_delta_);
+
+        cv::rectangle(img, dst_dets[dst_ind].box_, cv::Scalar(0, 255, 0), 2);
+        cv::rectangle(img, src_dets[src_ind].box_, cv::Scalar(255, 0, 0), 2);
+
+        cv::imwrite(fmt::format("/root/data/images/{}_{}_{}_{}.png",
+                                src_track_id, dst_link.track_id_, src_ind,
+                                dst_ind),
+                    img);
+      }
+    }
 #endif
+
+    const auto &this_timestamp_dets{
+        dst_bag->image_detections_.at(dst_dets[dst_ind].timestamp_).dets_};
+
+    const auto src_center{src_dets[src_ind].center_undistorted_};
+
+    double min_dist{std::numeric_limits<double>::max()};
+    size_t closest_track{0};
+
+    for (auto &d : this_timestamp_dets) {
+      if (d->code_ == src_track.code_) {
+
+        if (d->enu_.has_value()) {
+          const auto dist{
+              cv::norm(Vec2f{d->center_undistorted_}, cv::Vec2f{src_center})};
+
+          if (dist < min_dist) {
+            min_dist = dist;
+            closest_track = d->track_id_;
+          }
+        }
+      }
+    }
+
+    dst_minmax.add(dst_track.dets_[dst_ind].cumulative_length_);
+    src_minmax.add(src_track.dets_[src_ind].cumulative_length_);
+
+    if (closest_track != dst_link.track_id_) {
+      return false;
+    }
+
+    // ++num_hits[closest_track];
+  }
+
+  const auto dst_length_ratio{dst_minmax.delta() / dst_track.length_};
+  const auto src_length_ratio{src_minmax.delta() / src_track.length_};
+
+  const bool track_intersection{dst_length_ratio >= 0.5 and
+                                src_length_ratio >= 0.5};
+
+  return track_intersection;
+
+  // const auto track_with_max_hits{
+  //     std::max_element(
+  //         num_hits.begin(), num_hits.end(),
+  //         [](const auto &a, const auto &b) { return a.second < b.second; })
+  //         ->first};
+
+  // return track_with_max_hits == dst_link.track_id_;
+}
+
+void TracksCollection::log_current_state() const {
+
+  if (rec_) {
+
+    rerun::Collection<rerun::components::LatLon> ss;
+
+    std::vector<rerun::components::GeoLineString> segments{};
+    std::vector<rerun::components::LatLon> points{};
+
+    for (auto &&[landmark_ind, landmark] : landmarks_.landmarks_ | enumerate) {
+
+      for (auto &&link : landmarks_.landmark_to_bag_.at(landmark_ind)) {
+
+        segments.emplace_back(rerun::components::GeoLineString::from_lat_lon(
+            {to_lat_lon(landmark.latlon_),
+             to_lat_lon(landmarks_.at(link).latlon_)}));
+      }
+
+      points.emplace_back(to_lat_lon(landmark.latlon_));
+    }
+
+    rec_->log("map/links", rerun::GeoLineStrings{segments}
+                               .with_colors(to_color("rgba(218, 123, 16, 1)"))
+                               .with_radii(rerun::Radius::ui_points(2.0f)));
+
+    rec_->log("map/points", rerun::GeoPoints{points}
+                                .with_colors(to_color("rgba(37, 1, 201, 1)"))
+                                .with_radii(rerun::Radius::ui_points(5.0f)));
+
+    [[maybe_unused]] const auto err{rec_->flush_blocking()};
+  }
 }

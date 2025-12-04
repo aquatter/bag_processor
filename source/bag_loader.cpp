@@ -36,6 +36,9 @@ struct BagLoader::impl {
       }
     }
 
+    reader_.seek(
+        reader_.get_metadata().starting_time.time_since_epoch().count());
+
     return {};
   }
 

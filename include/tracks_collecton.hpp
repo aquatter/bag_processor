@@ -10,7 +10,6 @@
 #include <serialization.hpp>
 #include <types.hpp>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,7 +34,7 @@ struct CombinedLandmarks {
   std::unordered_map<size_t, std::vector<Link>> landmark_to_bag_;
   std::unordered_map<Link, size_t, Link> bag_to_landmark_;
 
-  void add(Link link, Landmark landmark) {
+  void add(Link link, const Landmark &landmark) {
     landmark_to_bag_[landmarks_.size()].emplace_back(link);
     bag_to_landmark_[link] = landmarks_.size();
     landmarks_.push_back(std::move(landmark));
@@ -48,6 +47,16 @@ struct CombinedLandmarks {
   const Landmark &at(Link link) const {
     return landmarks_[bag_to_landmark_.at(link)];
   }
+
+  std::span<const Link> linked_bags(Link link) const {
+    return landmark_to_bag_.at(bag_to_landmark_.at(link));
+  }
+
+  std::span<const Link> linked_bags(size_t ind) const {
+    return landmark_to_bag_.at(ind);
+  }
+
+  size_t landmark_index(Link link) const { return bag_to_landmark_.at(link); }
 
   void link(Link src, Link dst) {
     if (contain(dst)) {
@@ -68,15 +77,28 @@ public:
 private:
   void init(BagProcessor::ptr bag);
   void recalculate_coords(BagProcessor::ptr bag);
-  bool should_be_linked(size_t bag_index, size_t track_id,
-                        const std::unordered_set<size_t> &det_ind,
-                        BagProcessor::ptr src_bag, size_t src_bag_id) const;
+  bool should_be_linked(CombinedLandmarks::Link dst_link,
+                        std::span<const size_t> det_ind, size_t src_track_id);
+
+  std::optional<Landmark> try_link(CombinedLandmarks::Link link,
+                                   const ImageTrack &new_track) const;
+
+  bool check_proximity(CombinedLandmarks::Link link,
+                       const ImageTrack &track) const;
+
+  bool check_closest_box_and_intersecton(CombinedLandmarks::Link dst_link,
+                                         std::span<const size_t> det_ind,
+                                         size_t src_track_id) const;
+
+  void combine_landmarks(std::span<const size_t> affected_landmarks);
 
   friend class boost::serialization::access;
 
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & bags_;
   }
+
+  void log_current_state() const;
 
   std::vector<BagProcessor::ptr> bags_;
   CartesianConverter converter_;

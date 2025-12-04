@@ -20,7 +20,7 @@ Eigen::Vector3d triangulate_gtsam(
     const gtsam::Point2Vector &measurements);
 
 std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
-get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
+get_points_in_the_radius(std::span<const CameraMeasurement> points, double rad,
                          Eigen::Vector2d query_point, ptrdiff_t ind);
 
 std::vector<rerun::Vec3D>
@@ -32,7 +32,7 @@ estimate_direction_spline(std::span<const Eigen::Vector2d> points,
                           Eigen::Vector2d query_point);
 
 void correct_orientation(Landmark &landmark,
-                         std::span<const GpsMeasurement> gps_track);
+                         std::span<const CameraMeasurement> gps_track);
 
 void link_detections(ImageDetections::map_type &detections);
 

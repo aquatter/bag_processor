@@ -219,10 +219,10 @@ struct GpsMeasurement {
 
 struct CameraMeasurement {
   int64_t timestamp_;
-  uint64_t id_;
+  Eigen::Vector2d enu_;
 
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & timestamp_;
-    ar & id_;
+    ar & enu_;
   }
 };

@@ -11,18 +11,40 @@
 #include <fmt/format.h>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/filter.hpp>
+#include <range/v3/view/linear_distribute.hpp>
 #include <range/v3/view/transform.hpp>
+#include <regex>
 #include <rerun/components/vector2d.hpp>
 #include <rerun_logging.hpp>
+#include <string>
+#include <string_view>
 #include <vector>
 
 using ranges::to;
 using ranges::views::filter;
+using ranges::views::linear_distribute;
 using ranges::views::transform;
 using namespace rerun;
 
+rerun::Color to_color(const std::string_view str) {
+
+  std::regex re{R"(rgba\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\))"};
+  std::cmatch match;
+
+  if (std::regex_match(str.data(), match, re)) {
+    if (match.size() == 5) {
+      return rerun::Color{static_cast<uint8_t>(std::stoi(match[1].str())),
+                          static_cast<uint8_t>(std::stoi(match[2].str())),
+                          static_cast<uint8_t>(std::stoi(match[3].str()))};
+    }
+  }
+
+  return {255, 255, 255}; // Default color if regex does not match
+}
+
 void log_track_map(std::shared_ptr<rerun::RecordingStream> rec,
-                   const ImageTrack &track, rerun::Color color) {
+                   const ImageTrack &track, rerun::Color color,
+                   const std::string_view entity_path) {
 
   const GeographicLib::LocalCartesian converter{
       track.geodetic_origin_.x(), track.geodetic_origin_.y(), 0.0};
@@ -38,7 +60,11 @@ void log_track_map(std::shared_ptr<rerun::RecordingStream> rec,
                   }) |
                   to<std::vector>()};
 
-  rec->log(fmt::format("map/{}_{}", track.name_, track.id_),
+  const std::string ep{entity_path.empty()
+                           ? fmt::format("map/{}_{}", track.name_, track.id_)
+                           : std::string{entity_path.data()}};
+
+  rec->log(ep,
            rerun::GeoLineStrings{
                rerun::components::GeoLineString::from_lat_lon(path)}
                .with_colors(color)
@@ -49,22 +75,24 @@ void log_track_map(std::shared_ptr<rerun::RecordingStream> rec,
 
 void log_segment(const std::string_view entity_path,
                  std::shared_ptr<rerun::RecordingStream> rec,
-                 rerun::components::LatLon p0, rerun::components::LatLon p1) {
+                 rerun::components::LatLon p0, rerun::components::LatLon p1,
+                 rerun::Color line_color, rerun::Color point_color) {
 
   rec->log(entity_path,
            rerun::GeoLineStrings{rerun::components::GeoLineString::from_lat_lon(
                                      {p0.lat_lon, p1.lat_lon})}
-               .with_colors(rerun::Color{255, 255, 0})
+               .with_colors(line_color)
                .with_radii(rerun::Radius::ui_points(2.0f)));
 
   rec->log(entity_path, rerun::GeoPoints{{p0, p1}}
-                            .with_colors(rerun::Color{0, 0, 255})
+                            .with_colors(point_color)
                             .with_radii(rerun::Radius::ui_points(5.0f)));
 }
 
 void log_segment(std::shared_ptr<rerun::RecordingStream> rec,
                  const ImageTrack &track1, const ImageTrack &track2,
                  size_t index1, size_t index2) {
+
   const GeographicLib::LocalCartesian converter1{
       track1.geodetic_origin_.x(), track1.geodetic_origin_.y(), 0.0};
 
@@ -160,12 +188,70 @@ void log_detection(std::shared_ptr<rerun::RecordingStream> rec,
 }
 
 void log_landmark(std::shared_ptr<rerun::RecordingStream> rec,
-                  const Landmark &landmark, Color color) {
+                  const Landmark &landmark, Color color, float ui_points) {
 
   rec->log(fmt::format("map/{}_{}", landmark.code_, landmark.id_),
            GeoPoints{{LatLon{landmark.latlon_.x(), landmark.latlon_.y()}}}
                .with_colors(color)
-               .with_radii(Radius::ui_points(2.0f)));
+               .with_radii(Radius::ui_points(ui_points)));
 
   [[maybe_unused]] const auto err{rec->flush_blocking()};
+}
+
+void log_poly(const std::string_view entity_path,
+              std::shared_ptr<rerun::RecordingStream> rec,
+              const PolyResult<3> &poly, rerun::Color color,
+              const CartesianConverter &converter) {
+
+  std::vector<rerun::DVec2D> vec{};
+
+  if (poly.horizontal_) {
+    for (auto &&x : linear_distribute(poly.point_.x() - 20.0,
+                                      poly.point_.x() + 20.0, 30)) {
+
+      double y{0.0};
+      double x_val{1.0};
+
+      for (auto &&p : poly.poly_) {
+        y += p * x_val;
+        x_val *= x;
+      }
+
+      const auto latlon{converter.latlon({x, y})};
+      vec.emplace_back(latlon.x(), latlon.y());
+    }
+  } else {
+    for (auto &&y : linear_distribute(poly.point_.y() - 20.0,
+                                      poly.point_.y() + 20.0, 30)) {
+
+      double x{0.0};
+      double y_val{1.0};
+
+      for (auto &&p : poly.poly_) {
+        x += p * y_val;
+        y_val *= y;
+      }
+
+      const auto latlon{converter.latlon({x, y})};
+      vec.emplace_back(latlon.x(), latlon.y());
+    }
+  }
+
+  rerun::LatLon p{};
+  {
+    const auto point{converter.latlon(poly.point_)};
+    p = rerun::LatLon{point.x(), point.y()};
+  }
+
+  rec->log(entity_path,
+           rerun::GeoLineStrings{
+               {rerun::components::GeoLineString::from_lat_lon(vec)}}
+               .with_colors(color)
+               .with_radii(rerun::Radius::ui_points(2.0f)),
+           rerun::GeoPoints{{p}}
+               .with_colors(rerun::Color{0, 255, 0})
+               .with_radii(rerun::Radius::ui_points(5.0f)));
+
+  [[maybe_unused]]
+  const auto err{rec->flush_blocking()};
 }

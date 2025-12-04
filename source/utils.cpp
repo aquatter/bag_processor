@@ -7,11 +7,14 @@
 #include <flann/algorithms/dist.h>
 #include <flann/flann.hpp>
 #include <flann/util/matrix.h>
+#include <fmt/color.h>
+#include <fmt/core.h>
 #include <gtsam/geometry/triangulation.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <interpolation.h>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <ng-log/logging.h>
 #include <nlohmann/json.hpp>
@@ -83,7 +86,7 @@ Eigen::Vector3d triangulate_gtsam(
 }
 
 std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
-get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
+get_points_in_the_radius(std::span<const CameraMeasurement> points, double rad,
                          Eigen::Vector2d query_point, ptrdiff_t ind) {
 
   const double rad_squared{rad * rad};
@@ -95,9 +98,11 @@ get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
   int num_added{0};
 
   for (ptrdiff_t i{ind - 1}; i >= 0; --i) {
-    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared or
-        num_added < 5) {
-      points_queue.emplace_front(points[i].enu_.x(), points[i].enu_.y());
+
+    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared
+        //  or num_added < 5
+    ) {
+      points_queue.emplace_front(points[i].enu_);
       ++num_added;
       first_point = points[i].enu_;
     } else {
@@ -107,9 +112,11 @@ get_points_in_the_radius(std::span<const GpsMeasurement> points, double rad,
 
   num_added = 0;
   for (ptrdiff_t i{ind}; i < points.size(); ++i) {
-    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared or
-        num_added < 5) {
-      points_queue.emplace_back(points[i].enu_.x(), points[i].enu_.y());
+
+    if ((points[i].enu_ - query_point).squaredNorm() < rad_squared
+        // or num_added < 5
+    ) {
+      points_queue.emplace_back(points[i].enu_);
 
       ++num_added;
       last_point = points[i].enu_;
@@ -280,10 +287,11 @@ estimate_direction_spline(std::span<const Eigen::Vector2d> points,
 }
 
 void correct_orientation(Landmark &landmark,
-                         std::span<const GpsMeasurement> gps_track) {
+                         std::span<const CameraMeasurement> gps_track) {
 
-  auto it{ranges::min_element(
-      gps_track, [&landmark](const GpsMeasurement &a, const GpsMeasurement &b) {
+  auto it{
+      ranges::min_element(gps_track, [&landmark](const CameraMeasurement &a,
+                                                 const CameraMeasurement &b) {
         return (landmark.enu_ - a.enu_).squaredNorm() <
                (landmark.enu_ - b.enu_).squaredNorm();
       })};
@@ -513,8 +521,14 @@ struct Metrics::impl {
     res.recall_auc_ -= 0.5f * (res.recall_.front() + res.recall_.back());
     res.recall_auc_ *= delta;
 
-    LOG(INFO) << "precision AUC: " << res.precision_auc_;
-    LOG(INFO) << "recall AUC: " << res.recall_auc_;
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green),
+                             "Precision AUC: ")
+              << fmt::format(fmt::fg(fmt::color::coral), "{}",
+                             res.precision_auc_);
+
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green), "Recall AUC: ")
+              << fmt::format(fmt::fg(fmt::color::coral), "{}", res.recall_auc_);
+
     return res;
   }
 
@@ -602,6 +616,37 @@ size_t combine_landmarks(ImageTrack::map_type &tracks,
       }
     }
 
+    double best_variance{std::numeric_limits<double>::max()};
+    size_t best_tack_id{0};
+
+    for (auto &&id : defined_landmarks) {
+      if (best_variance > tracks.at(id).landmark_->dist_variance_) {
+        best_variance = tracks.at(id).landmark_->dist_variance_;
+        best_tack_id = id;
+      }
+    }
+
+    const auto &best_landmark{tracks.at(best_tack_id).landmark_.value()};
+
+    for (auto &&id : defined_landmarks) {
+      if (id == best_tack_id) {
+        continue;
+      }
+
+      tracks.at(id).landmark_->enu_ = best_landmark.enu_;
+      tracks.at(id).landmark_->latlon_ = best_landmark.latlon_;
+      tracks.at(id).landmark_->azimuth_ = best_landmark.azimuth_;
+      tracks.at(id).landmark_->dist_variance_ = best_landmark.dist_variance_;
+    }
+
+    for (auto &&id : undefined_landmarks) {
+      tracks.at(id).landmark_->enu_ = best_landmark.enu_;
+      tracks.at(id).landmark_->latlon_ = best_landmark.latlon_;
+      tracks.at(id).landmark_->azimuth_ = best_landmark.azimuth_;
+      tracks.at(id).landmark_->dist_variance_ = best_landmark.dist_variance_;
+    }
+
+#if 0 
     Eigen::Vector2d mean_enu{Eigen::Vector2d::Zero()};
     double mean_azimuth{0.0};
     double norm{0.0};
@@ -628,13 +673,12 @@ size_t combine_landmarks(ImageTrack::map_type &tracks,
     }
 
     for (auto &&id : undefined_landmarks) {
-      tracks.at(id).landmark_ = Landmark{.id_ = tracks.at(id).id_,
-                                         .code_ = tracks.at(id).code_,
-                                         .enu_ = mean_enu,
-                                         .latlon_ = mean_lla,
-                                         .azimuth_ = mean_azimuth,
-                                         .dist_variance_ = dist_variance};
+      tracks.at(id).landmark_->enu_ = mean_enu;
+      tracks.at(id).landmark_->latlon_ = mean_lla;
+      tracks.at(id).landmark_->azimuth_ = mean_azimuth;
+      tracks.at(id).landmark_->dist_variance_ = dist_variance;
     }
+#endif
   }
 
   return ranges::count_if(
