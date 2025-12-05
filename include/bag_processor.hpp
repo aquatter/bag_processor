@@ -34,6 +34,7 @@ struct BagProcessorSettings {
   std::string session_name_;
   std::string compressed_image_topic_;
   std::string gps_topic_;
+  bool gopro_mode_;
 
   template <typename Archive> void serialize(Archive &ar, const uint32_t) {
     ar & bag_path_;
@@ -47,6 +48,7 @@ struct BagProcessorSettings {
     ar & session_name_;
     ar & compressed_image_topic_;
     ar & gps_topic_;
+    ar & gopro_mode_;
   }
 };
 

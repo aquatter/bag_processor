@@ -84,3 +84,50 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     CXX_STANDARD_REQUIRED YES
 )
 
+add_executable(combine_bags
+    combine_bags.cpp
+    source/csv_parser.cpp
+    source/bag_processor.cpp
+    source/feature_tracker.cpp
+    source/utils.cpp
+    source/types.cpp
+    source/bag_loader.cpp
+    source/triangulation.cpp
+    source/tracks_collection.cpp
+    source/rerun_logging.cpp
+    source/cartesian_converter.cpp
+    ${ALGLIB_SOURCES}
+)
+
+target_link_libraries(combine_bags
+    ${OpenCV_LIBS}
+    fmt::fmt
+    rcl::rcl
+    rosbag2_cpp::rosbag2_cpp
+    rosbag2_transport::rosbag2_transport
+    sensor_msgs::sensor_msgs_library
+    ${GeographicLib_LIBRARIES}
+    gtsam
+    rerun_sdk
+    nlohmann_json::nlohmann_json
+    range-v3::range-v3 range-v3::meta range-v3::concepts
+    yaml-cpp::yaml-cpp
+    ng-log::ng-log
+    ov_core_lib
+    flann::flann
+    OpenMP::OpenMP_CXX
+    gpmf-extractor
+)
+
+target_include_directories(combine_bags PRIVATE
+    include
+    sort-cpp/include
+    csvworker
+    alglib-cpp
+    open_vins/ov_core/src
+)
+
+set_target_properties(combine_bags PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+)

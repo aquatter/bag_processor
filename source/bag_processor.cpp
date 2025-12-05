@@ -1,5 +1,4 @@
 #include <Eigen/Geometry>
-#include <Eigen/src/Core/Matrix.h>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
 #include <array>
@@ -19,6 +18,8 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <fstream>
+#include <gpmf_frame.hpp>
+#include <gpmf_parser.hpp>
 #include <gtsam/base/Matrix.h>
 #include <gtsam/base/Vector.h>
 #include <gtsam/geometry/Cal3_S2.h>
@@ -45,6 +46,7 @@
 #include <optional>
 #include <progress_bar.hpp>
 #include <random>
+#include <range/v3/action/push_back.hpp>
 #include <range/v3/algorithm/copy.hpp>
 #include <range/v3/algorithm/count_if.hpp>
 #include <range/v3/algorithm/find_if.hpp>
@@ -323,8 +325,9 @@ void BagProcessor::load_tracks() {
       for (auto &&json_det : json_track["occurrences"]) {
 
         Detection det{};
-        det.timestamp_ =
-            json_det["timestamp"].get<int64_t>() + set_.camera_gps_delta_;
+
+        det.timestamp_ = camera_[json_det["frame"].get<int>()].timestamp_;
+        // json_det["timestamp"].get<int64_t>() + set_.camera_gps_delta_;
         det.box_.x = json_det["bbox"][0].get<int>();
         det.box_.y = json_det["bbox"][1].get<int>();
         det.box_.width = json_det["bbox"][2].get<int>() - det.box_.x + 1;
@@ -413,56 +416,113 @@ void BagProcessor::load_tracks() {
 
 void BagProcessor::load_measurements(const std::string_view path) {
 
-  rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image;
-  rclcpp::Serialization<sensor_msgs::msg::NavSatFix> serialization_gps;
-  rosbag2_cpp::Reader reader{};
-
-  reader.open(path.data());
-
   std::vector<CameraMeasurement> camera{};
-
   Eigen::Vector2d prev_enu{std::numeric_limits<double>::max(),
                            std::numeric_limits<double>::max()};
 
-  while (reader.has_next()) {
-    auto msg{reader.read_next()};
-    const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
+  if (set_.gopro_mode_) {
+    GPMFParserSettings parser_set{};
+    parser_set.paths_to_mp4_.push_back(set_.bag_path_);
+    parser_set.save_bag_ = false;
+    parser_set.save_geojson_ = false;
+    parser_set.callback_ = [this, &camera](const GPMFChunkBase *chunk) {
+      switch (chunk->whoami()) {
 
-    if (msg->topic_name == set_.compressed_image_topic_) {
-      sensor_msgs::msg::CompressedImage image_msg;
-      serialization_image.deserialize_message(&serialized_msg, &image_msg);
+      case ChunkType::GPS: {
+        const auto &m{static_cast<const GPSChunk *>(chunk)->measurements_};
 
-      const auto timestamp{
-          static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
-          static_cast<int64_t>(image_msg.header.stamp.nanosec)};
+        gps_ = std::move(gps_) |
+               ranges::actions::push_back(
+                   m | transform([](const GPSChunk::Measurement &val) {
+                     return GpsMeasurement{.timestamp_ = val.timestamp_,
+                                           .enu_ = Eigen::Vector2d::Zero(),
+                                           .latlon_ = val.lla_.head<2>()};
+                   }));
 
-      camera.emplace_back(timestamp + set_.camera_gps_delta_,
-                          Eigen::Vector2d::Zero());
-
-    } else if (msg->topic_name == set_.gps_topic_) {
-      sensor_msgs::msg::NavSatFix gps_msg;
-      serialization_gps.deserialize_message(&serialized_msg, &gps_msg);
-
-      const auto timestamp{static_cast<int64_t>(gps_msg.header.stamp.sec) *
-                               1'000'000'000 +
-                           static_cast<int64_t>(gps_msg.header.stamp.nanosec)};
-
-      if (not local_converter_.origin_set()) {
-        local_converter_.set_origin({gps_msg.latitude, gps_msg.longitude});
+        break;
       }
 
-      const Eigen::Vector2d current_enu{
-          local_converter_.enu({gps_msg.latitude, gps_msg.longitude})};
+      case ChunkType::Camera: {
+        const auto &m{static_cast<const SHUTChunk *>(chunk)->measurements_};
 
-      if ((current_enu - prev_enu).norm() > 2.0) {
-        prev_enu = current_enu;
-        stable_gps_.emplace_back(
-            timestamp, current_enu,
-            Eigen::Vector2d{gps_msg.latitude, gps_msg.longitude});
+        camera = std::move(camera) |
+                 ranges::actions::push_back(
+                     m | transform([this](const int64_t &val) {
+                       return CameraMeasurement{
+                           .timestamp_ = val + set_.camera_gps_delta_,
+                           .enu_ = Eigen::Vector2d::Zero()};
+                     }));
+
+        break;
       }
 
-      gps_.emplace_back(timestamp, current_enu,
-                        Eigen::Vector2d{gps_msg.latitude, gps_msg.longitude});
+      default:
+        break;
+      };
+    };
+
+    GPMFParser parser{parser_set};
+    parser.parse();
+
+    local_converter_.set_origin(gps_[gps_.size() >> 1].latlon_);
+
+    for (auto &&gps : gps_) {
+      gps.enu_ = local_converter_.enu(gps.latlon_);
+
+      if ((gps.enu_ - prev_enu).norm() > 2.0) {
+        prev_enu = gps.enu_;
+        stable_gps_.emplace_back(gps.timestamp_, gps.enu_, gps.latlon_);
+      }
+    }
+  } else {
+
+    rclcpp::Serialization<sensor_msgs::msg::CompressedImage>
+        serialization_image;
+    rclcpp::Serialization<sensor_msgs::msg::NavSatFix> serialization_gps;
+    rosbag2_cpp::Reader reader{};
+
+    reader.open(path.data());
+
+    while (reader.has_next()) {
+      auto msg{reader.read_next()};
+      const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
+
+      if (msg->topic_name == set_.compressed_image_topic_) {
+        sensor_msgs::msg::CompressedImage image_msg;
+        serialization_image.deserialize_message(&serialized_msg, &image_msg);
+
+        const auto timestamp{
+            static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
+            static_cast<int64_t>(image_msg.header.stamp.nanosec)};
+
+        camera.emplace_back(timestamp + set_.camera_gps_delta_,
+                            Eigen::Vector2d::Zero());
+
+      } else if (msg->topic_name == set_.gps_topic_) {
+        sensor_msgs::msg::NavSatFix gps_msg;
+        serialization_gps.deserialize_message(&serialized_msg, &gps_msg);
+
+        const auto timestamp{
+            static_cast<int64_t>(gps_msg.header.stamp.sec) * 1'000'000'000 +
+            static_cast<int64_t>(gps_msg.header.stamp.nanosec)};
+
+        if (not local_converter_.origin_set()) {
+          local_converter_.set_origin({gps_msg.latitude, gps_msg.longitude});
+        }
+
+        const Eigen::Vector2d current_enu{
+            local_converter_.enu({gps_msg.latitude, gps_msg.longitude})};
+
+        if ((current_enu - prev_enu).norm() > 2.0) {
+          prev_enu = current_enu;
+          stable_gps_.emplace_back(
+              timestamp, current_enu,
+              Eigen::Vector2d{gps_msg.latitude, gps_msg.longitude});
+        }
+
+        gps_.emplace_back(timestamp, current_enu,
+                          Eigen::Vector2d{gps_msg.latitude, gps_msg.longitude});
+      }
     }
   }
 
@@ -627,7 +687,8 @@ BagProcessor::estimate_camera_pos(Detection &d) {
   d.enu_ = res.point_;
 
   return Eigen::Isometry3d{
-      // Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f} *
+      // Eigen::Translation3d{d.pose_.value().x(), d.pose_.value().y(), 0.0f}
+      // *
       Eigen::Translation3d{res.point_.x(), res.point_.y(), 0.0f} *
       Eigen::AngleAxisd{set_.correction_angle_ *
                             boost::math::double_constants::degree,
@@ -668,7 +729,8 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
       // points_in_the_radius, cam_pose.head(2));
 
       // auto estimated_direction{
-      //     estimate_direction_spline(points_in_the_radius, cam_pose.head(2))};
+      //     estimate_direction_spline(points_in_the_radius,
+      //     cam_pose.head(2))};
 
       const auto res{
           estimate_direction<poly_degree_>(points_in_the_radius, cam_pose)};
