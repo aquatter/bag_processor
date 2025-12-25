@@ -36,6 +36,8 @@ struct BagProcessorSettings {
   std::string gps_topic_;
   bool gopro_mode_;
 
+  void print() const noexcept;
+
   template <typename Archive> void serialize(Archive &ar, const uint32_t) {
     ar & bag_path_;
     ar & annotations_path_;
@@ -126,6 +128,8 @@ private:
 
   size_t select_valid_tracks();
 
+  void calculate_descriptors();
+
   BagProcessorSettings set_;
   std::shared_ptr<rerun::RecordingStream> rec_;
   std::unordered_map<size_t, ImageTrack> image_tracks_;
@@ -135,6 +139,7 @@ private:
   std::unordered_map<int64_t, ImageDetections> image_detections_;
   CartesianConverter local_converter_;
   std::unordered_map<std::string, cv::Scalar> color_map_;
+  std::unordered_map<size_t, std::vector<uint8_t>> selected_frames_;
 
   CalibrationDesc calib_;
 
@@ -150,6 +155,7 @@ private:
     ar & calib_;
     ar & camera_;
     ar & local_converter_;
+    ar & selected_frames_;
 
     if (Archive::is_loading::value) {
       collect_detections();

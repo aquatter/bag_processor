@@ -9,11 +9,15 @@
 #include <sensor_msgs/msg/compressed_image.hpp>
 
 struct BagLoader::impl {
-  impl(const BagLoader::Settings &set) : set_{set} {
+  impl(const BagLoader::Settings &set, BagLoader *parent)
+      : set_{set}, parent_{parent} {
     reader_.open(set_.path_to_bag_);
   }
 
   cv::Mat_<cv::Vec3b> load_image(int64_t timestamp) {
+
+    reader_.seek(
+        reader_.get_metadata().starting_time.time_since_epoch().count());
 
     reader_.seek(timestamp);
 
@@ -36,8 +40,32 @@ struct BagLoader::impl {
       }
     }
 
+    return {};
+  }
+
+  cv::Mat_<cv::Vec3b> load_image(size_t image_id) {
+
     reader_.seek(
         reader_.get_metadata().starting_time.time_since_epoch().count());
+
+    size_t current_id{0};
+
+    while (reader_.has_next()) {
+      auto msg{reader_.read_next()};
+
+      if (msg->topic_name == set_.compressed_image_topic_) {
+        if (current_id == image_id) {
+          const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
+
+          sensor_msgs::msg::CompressedImage image_msg;
+          serialization_image_.deserialize_message(&serialized_msg, &image_msg);
+
+          return cv::imdecode(image_msg.data, cv::IMREAD_UNCHANGED);
+        }
+
+        ++current_id;
+      }
+    }
 
     return {};
   }
@@ -128,16 +156,59 @@ struct BagLoader::impl {
     cv::imwrite(path.data(), img);
   }
 
+  std::vector<std::vector<uint8_t>>
+  extract(std::span<const size_t> frame_list) {
+
+    reader_.seek(
+        reader_.get_metadata().starting_time.time_since_epoch().count());
+
+    size_t current_id{0};
+    size_t frame_list_index{0};
+
+    std::vector<std::vector<uint8_t>> res{};
+    res.reserve(frame_list.size());
+
+    while (reader_.has_next()) {
+      auto msg{reader_.read_next()};
+
+      if (msg->topic_name == set_.compressed_image_topic_) {
+        if (current_id == frame_list[frame_list_index]) {
+          const rclcpp::SerializedMessage serialized_msg{*msg->serialized_data};
+
+          sensor_msgs::msg::CompressedImage image_msg;
+          serialization_image_.deserialize_message(&serialized_msg, &image_msg);
+
+          res.push_back(image_msg.data);
+          parent_->progress();
+          ++frame_list_index;
+
+          if (frame_list_index >= frame_list.size()) {
+            break;
+          }
+        }
+
+        ++current_id;
+      }
+    }
+
+    return res;
+  };
+
   BagLoader::Settings set_;
   rosbag2_cpp::Reader reader_;
   rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serialization_image_;
+  BagLoader *parent_;
 };
 
 BagLoader::BagLoader(const BagLoader::Settings &set)
-    : pimpl_{std::make_unique<impl>(set)} {}
+    : pimpl_{std::make_unique<impl>(set, this)} {}
 
 cv::Mat_<cv::Vec3b> BagLoader::load_image(int64_t timestamp) {
   return pimpl_->load_image(timestamp);
+}
+
+cv::Mat_<cv::Vec3b> BagLoader::load_image(size_t image_id) {
+  return pimpl_->load_image(image_id);
 }
 
 void BagLoader::dump_tracks(const ImageTrack::map_type &tracks,
@@ -150,6 +221,11 @@ void BagLoader::dump_tracks(const ImageTrack::map_type &tracks,
 void BagLoader::dump_detection(const std::string_view path,
                                const Detection &det) {
   pimpl_->dump_detection(path, det);
+}
+
+std::vector<std::vector<uint8_t>>
+BagLoader::extract(std::span<const size_t> frame_list) {
+  return pimpl_->extract(frame_list);
 }
 
 BagLoader::~BagLoader() = default;

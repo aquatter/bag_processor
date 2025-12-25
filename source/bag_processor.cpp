@@ -2,8 +2,10 @@
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bag_loader.hpp>
 #include <bag_processor.hpp>
+#include <boost/algorithm/string.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/math/constants/constants.hpp>
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <csv_parser.hpp>
 #include <exception>
+#include <extract_frames.hpp>
 #include <feature_tracker.hpp>
 #include <filesystem>
 #include <fmt/color.h>
@@ -35,12 +38,14 @@
 #include <interpolation.h>
 #include <limits>
 #include <memory>
+#include <mp4_image_loader.hpp>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <numbers>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
-#include <opencv2/core/matx.hpp>
+#include <opencv2/features2d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <optional>
@@ -53,6 +58,7 @@
 #include <range/v3/algorithm/max.hpp>
 #include <range/v3/algorithm/sort.hpp>
 #include <range/v3/range/conversion.hpp>
+#include <range/v3/view/drop.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/iota.hpp>
 #include <range/v3/view/linear_distribute.hpp>
@@ -72,10 +78,12 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tracker.h>
 #include <triangulation.hpp>
 #include <types.hpp>
 #include <unordered_map>
+#include <unordered_set>
 #include <utils.hpp>
 #include <vector>
 #include <yaml-cpp/node/node.h>
@@ -83,6 +91,7 @@
 #include <yaml-cpp/yaml.h>
 
 using ranges::to;
+using ranges::views::drop;
 using ranges::views::enumerate;
 using ranges::views::ints;
 using ranges::views::linear_distribute;
@@ -92,7 +101,9 @@ using ranges::views::zip;
 
 BagProcessor::BagProcessor() = default;
 
-BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {}
+BagProcessor::BagProcessor(const BagProcessorSettings &set) : set_{set} {
+  set_.print();
+}
 
 void BagProcessor::calculate() {
 
@@ -118,6 +129,7 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# valid tracks: " << select_valid_tracks();
   LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
 
+  calculate_descriptors();
   calculate_metrics();
 
   LOG(INFO) << "# combined landmarks: "
@@ -326,7 +338,9 @@ void BagProcessor::load_tracks() {
 
         Detection det{};
 
-        det.timestamp_ = camera_[json_det["frame"].get<int>()].timestamp_;
+        det.image_id_ = json_det["frame"].get<int>();
+        det.timestamp_ = camera_[det.image_id_].timestamp_;
+
         // json_det["timestamp"].get<int64_t>() + set_.camera_gps_delta_;
         det.box_.x = json_det["bbox"][0].get<int>();
         det.box_.y = json_det["bbox"][1].get<int>();
@@ -425,6 +439,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
     parser_set.paths_to_mp4_.push_back(set_.bag_path_);
     parser_set.save_bag_ = false;
     parser_set.save_geojson_ = false;
+    parser_set.no_imu_ = true;
     parser_set.callback_ = [this, &camera](const GPMFChunkBase *chunk) {
       switch (chunk->whoami()) {
 
@@ -465,6 +480,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
     parser.parse();
 
     local_converter_.set_origin(gps_[gps_.size() >> 1].latlon_);
+    // local_converter_.set_origin(gps_.front().latlon_);
 
     for (auto &&gps : gps_) {
       gps.enu_ = local_converter_.enu(gps.latlon_);
@@ -529,10 +545,6 @@ void BagProcessor::load_measurements(const std::string_view path) {
   std::sort(gps_.begin(), gps_.end(), [](const auto &a, const auto &b) {
     return a.timestamp_ < b.timestamp_;
   });
-
-  std::sort(
-      stable_gps_.begin(), stable_gps_.end(),
-      [](const auto &a, const auto &b) { return a.timestamp_ < b.timestamp_; });
 
   for (auto &&cam : camera) {
     const auto it{
@@ -1664,4 +1676,236 @@ size_t BagProcessor::num_valid_tracks() const {
   return ranges::count_if(image_tracks_, [](auto &&val) {
     return val.second.landmark_.has_value();
   });
+}
+
+void BagProcessor::calculate_descriptors() {
+
+  LOG(INFO) << "Calculating descriptors...";
+
+  std::unordered_set<size_t> frames_to_extract{};
+
+  for (auto &&[track_id, track] : image_tracks_) {
+
+    if (not track.valid_) {
+      continue;
+    }
+
+    for (auto &&det_ind : track.selected_detections_) {
+
+      if (frames_to_extract.contains(track.dets_[det_ind].image_id_)) {
+        continue;
+      }
+
+      std::unordered_map<std::string, int> class_count{};
+
+      for (auto &&det :
+           image_detections_[track.dets_[det_ind].timestamp_].dets_) {
+
+        ++class_count[det->class_];
+      }
+
+      for (auto &&[class_id, count] : class_count) {
+        if (count > 1) {
+          frames_to_extract.insert(track.dets_[det_ind].image_id_);
+          break;
+        }
+      }
+    }
+  }
+
+#if 1
+  std::unique_ptr<LoaderBase> image_loader{};
+
+  if (set_.gopro_mode_) {
+    image_loader = std::make_unique<Mp4ImageLoader>(set_.bag_path_);
+  } else {
+    image_loader = std::make_unique<BagLoader>(BagLoader::Settings{
+        .compressed_image_topic_ = set_.compressed_image_topic_,
+        .path_to_bag_ = set_.bag_path_,
+        .timestamp_delta_ = set_.camera_gps_delta_,
+        .rec_ = {}});
+  }
+
+#endif
+  // auto detector{cv::AKAZE::create()};
+
+#if 1
+  std::vector<ProgressBar::ProgressInfo> topics{
+      ProgressBar::ProgressInfo{.message_count_ = frames_to_extract.size(),
+                                .processed_count_ = 0,
+                                .topic_name_ = "frames: ",
+                                .ind_ = 0}};
+
+  ProgressBar progress{topics};
+  progress.draw();
+#endif
+
+#if 0
+  {
+    std::vector<std::thread> threads{};
+
+    std::mutex progress_protector{};
+    std::atomic_size_t ind{0};
+    std::vector<size_t> image_ids{};
+    image_ids.reserve(descriptors_.size());
+
+    for (auto &&[image_id, descriprtor] : descriptors_) {
+      image_ids.push_back(image_id);
+    }
+
+    std::sort(image_ids.begin(), image_ids.end());
+
+    for (auto &&i : ints(0u, std::thread::hardware_concurrency())) {
+      threads.emplace_back([&, this]() {
+        auto detector{cv::AKAZE::create()};
+
+        std::unique_ptr<LoaderBase> image_loader{};
+
+        if (set_.gopro_mode_) {
+          image_loader = std::make_unique<Mp4ImageLoader>(set_.bag_path_);
+        } else {
+          image_loader = std::make_unique<BagLoader>(BagLoader::Settings{
+              .compressed_image_topic_ = set_.compressed_image_topic_,
+              .path_to_bag_ = set_.bag_path_,
+              .timestamp_delta_ = set_.camera_gps_delta_,
+              .rec_ = {}});
+        }
+
+        while (true) {
+          const auto image_ind{ind.fetch_add(1)};
+
+          if (image_ind >= image_ids.size()) {
+            break;
+          }
+
+          auto &descriptor{descriptors_[image_ids[image_ind]]};
+
+          if (auto img = image_loader->load_image(image_ids[image_ind]);
+              not img.empty()) {
+            cv::Mat_<uint8_t> gray_img;
+            cv::cvtColor(img, gray_img, cv::COLOR_BGR2GRAY);
+
+            std::vector<cv::KeyPoint> keypoints{};
+            cv::Mat_<uint8_t> desc;
+
+            detector->detectAndCompute(gray_img, cv::noArray(), keypoints,
+                                       desc);
+
+            descriptor.keypoints_ =
+                keypoints |
+                transform([](const cv::KeyPoint &kp) { return kp.pt; }) |
+                to<std::vector>();
+
+            descriptor.descriptors_ = desc;
+            calib_.undistort_points(descriptor.keypoints_);
+          }
+
+          {
+            std::lock_guard<std::mutex> lock{progress_protector};
+            progress.advance("descriptors: ");
+          }
+        }
+      });
+    }
+
+    for (auto &t : threads) {
+      if (t.joinable()) {
+        t.join();
+      }
+    }
+  }
+#endif
+
+  std::vector<size_t> image_ids{};
+  image_ids.reserve(frames_to_extract.size());
+
+  for (auto &&image_id : frames_to_extract) {
+    image_ids.push_back(image_id);
+  }
+
+  std::sort(image_ids.begin(), image_ids.end());
+  image_loader->set_progress([&progress]() { progress.advance("frames: "); });
+
+  const auto bufs{image_loader->extract(image_ids)};
+
+  for (auto &&[image_id, buf] : zip(image_ids, bufs)) {
+    selected_frames_[image_id] = std::move(buf);
+  }
+
+#if 0
+  for (auto &&image_id : image_ids) {
+
+    if (auto img = image_loader->load_image(image_id); not img.empty()) {
+
+      cv::Mat_<uint8_t> gray_img;
+      cv::cvtColor(img, gray_img, cv::COLOR_BGR2GRAY);
+
+      std::vector<cv::KeyPoint> keypoints{};
+      cv::Mat_<uint8_t> desc;
+
+      detector->detectAndCompute(gray_img, cv::noArray(), keypoints, desc);
+
+      descriptors_.at(image_id).keypoints_ =
+          keypoints | transform([](const cv::KeyPoint &kp) { return kp.pt; }) |
+          to<std::vector>();
+
+      descriptors_.at(image_id).descriptors_ = desc;
+      calib_.undistort_points(descriptors_.at(image_id).keypoints_);
+    }
+
+    progress.advance("descriptors: ");
+  }
+
+#endif
+  progress.done();
+}
+
+void BagProcessorSettings::print() const noexcept {
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "Input path: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}", bag_path_);
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                           "Path to detections: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           annotations_path_);
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                           "Path to calibration: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           calibration_path_);
+
+  if (not ground_truth_path_.empty()) {
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                             "Path to ground truth labels: ")
+              << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                             ground_truth_path_);
+  }
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                           "Camera correction angle: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           correction_angle_);
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                           "Difference between camera and GPS in nanoseconds: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           camera_gps_delta_);
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "Session name: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           session_name_);
+  if (not gopro_mode_) {
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "GoPro mode: ")
+              << fmt::format(fmt::fg(fmt::color::orange_red), "False");
+
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "Image topic: ")
+              << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                             compressed_image_topic_);
+
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "GPS topic: ")
+              << fmt::format(fmt::fg(fmt::color::orange_red), "{}", gps_topic_);
+  } else {
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "GoPro mode: ")
+              << fmt::format(fmt::fg(fmt::color::orange_red), "True");
+  }
 }

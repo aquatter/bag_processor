@@ -91,7 +91,7 @@ int main(const int argc, const char *const *argv) {
 
     app.add_flag("--gopro-mode", set.gopro_mode_,
                  "Enable GoPro video processing mode")
-        ->default_val(true);
+        ->default_val(false);
 
     app.add_flag("--use-logger", set.use_logger_, "Enable rerun logger")
         ->default_val(false);
@@ -149,8 +149,8 @@ int main(const int argc, const char *const *argv) {
   constexpr static std::string_view folder_name{"domodedovo/gopro_01_11"};
 
   BagProcessorSettings set{
-      .bag_path_ =
-          fmt::format("/root/data/{}/{}", folder_name.data(), file_name.data()),
+      .bag_path_ = fmt::format("/root/data/{}/{}.MP4", folder_name.data(),
+                               file_name.data()),
       .annotations_path_ = fmt::format("/root/data/{}/detections_{}.json",
                                        folder_name.data(), file_name.data()),
       .calibration_path_ =
@@ -163,7 +163,8 @@ int main(const int argc, const char *const *argv) {
       .use_logger_ = true,
       .session_name_ = "gopro_01_11",
       .compressed_image_topic_ = "/camera/image_raw/compressed",
-      .gps_topic_ = "/fix"};
+      .gps_topic_ = "/fix",
+      .gopro_mode_ = true};
 #else
   constexpr static std::string_view file_name{"video20250831-125017"};
   constexpr static std::string_view folder_name{"domodedovo/video_domodedovo"};

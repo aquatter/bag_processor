@@ -2,9 +2,9 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <Eigen/src/Core/Matrix.h>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/geometry/PinholeCamera.h>
 #include <gtsam/geometry/Pose3.h>
@@ -63,6 +63,7 @@ struct Detection {
 
   size_t det_id_;
   size_t track_id_;
+  size_t image_id_;
   int64_t timestamp_;
   std::string class_;
   std::string code_;
@@ -84,6 +85,7 @@ struct Detection {
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
     ar & det_id_;
     ar & track_id_;
+    ar & image_id_;
     ar & timestamp_;
     ar & class_;
     ar & code_;
@@ -225,4 +227,33 @@ struct CameraMeasurement {
     ar & timestamp_;
     ar & enu_;
   }
+};
+
+struct Descriptors {
+  size_t image_id_;
+  cv::Mat_<uint8_t> descriptors_;
+  std::vector<cv::Point2f> keypoints_;
+
+  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
+    ar & image_id_;
+    ar & descriptors_;
+    ar & keypoints_;
+  }
+};
+
+struct LoaderBase {
+  virtual cv::Mat_<cv::Vec3b> load_image(size_t image_id) = 0;
+  virtual std::vector<std::vector<uint8_t>>
+  extract(std::span<const size_t> frame_list) = 0;
+
+  void set_progress(std::function<void()> f) { prog_ = std::move(f); }
+
+  void progress() {
+    if (prog_) {
+      prog_();
+    }
+  }
+
+  virtual ~LoaderBase() = default;
+  std::function<void()> prog_;
 };

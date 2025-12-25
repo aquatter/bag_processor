@@ -12,7 +12,7 @@ find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(OpenCV REQUIRED core imgproc imgcodecs videoio calib3d)
+find_package(OpenCV REQUIRED core imgproc imgcodecs videoio calib3d features2d)
 find_package(GeographicLib REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(nlohmann_json REQUIRED)
@@ -21,6 +21,14 @@ find_package(yaml-cpp REQUIRED)
 find_package(ng-log REQUIRED)
 find_package(flann REQUIRED)
 find_package(OpenMP COMPONENTS CXX REQUIRED)
+find_package(PkgConfig REQUIRED)
+
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat
+    libavcodec
+    libavutil
+    libswscale
+)
 
 add_subdirectory(open_vins/ov_core)
 add_subdirectory(bag_converter)
@@ -48,10 +56,13 @@ add_executable(${PROJECT_NAME}
     source/tracks_collection.cpp
     source/rerun_logging.cpp
     source/cartesian_converter.cpp
+    source/mp4_image_loader.cpp
+    source/extract_frames.cpp
     ${ALGLIB_SOURCES}
 )
 
 target_link_libraries(${PROJECT_NAME}
+    PkgConfig::FFMPEG
     ${OpenCV_LIBS}
     fmt::fmt
     rcl::rcl
@@ -131,3 +142,50 @@ set_target_properties(combine_bags PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
 )
+
+# find_path(FFMPEG_INCLUDE_DIR
+#     NAMES libavformat/avformat.h
+#     HINTS
+#     ${FFMPEG_ROOT}
+#     ${FFMPEG_ROOT}/include
+#     PATH_SUFFIXES include
+# )
+
+# find_library(AVFORMAT_LIB NAMES avformat HINTS ${FFMPEG_ROOT} ${FFMPEG_ROOT}/lib PATH_SUFFIXES lib)
+# find_library(AVCODEC_LIB NAMES avcodec HINTS ${FFMPEG_ROOT} ${FFMPEG_ROOT}/lib PATH_SUFFIXES lib)
+# find_library(AVUTIL_LIB NAMES avutil HINTS ${FFMPEG_ROOT} ${FFMPEG_ROOT}/lib PATH_SUFFIXES lib)
+# find_library(SWSCALE_LIB NAMES swscale HINTS ${FFMPEG_ROOT} ${FFMPEG_ROOT}/lib PATH_SUFFIXES lib)
+
+add_executable(test_matching
+    test_match.cpp
+)
+
+
+set_target_properties(test_matching PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)
+
+target_link_options(test_matching PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_matching PRIVATE
+    PkgConfig::FFMPEG
+    ${OpenCV_LIBS}
+    # fmt::fmt
+    # range-v3::range-v3 range-v3::meta range-v3::concepts
+    # yaml-cpp::yaml-cpp
+    # ng-log::ng-log
+    # OpenMP::OpenMP_CXX
+    # gpmf-extractor
+    # ${GeographicLib_LIBRARIES}
+)
+
+target_include_directories(test_matching PRIVATE
+    include
+    sort-cpp/include
+)
+
+set_target_properties(test_matching PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+)
+
