@@ -128,7 +128,7 @@ private:
 
   size_t select_valid_tracks();
 
-  void calculate_descriptors();
+  void extract_images();
 
   BagProcessorSettings set_;
   std::shared_ptr<rerun::RecordingStream> rec_;

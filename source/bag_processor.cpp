@@ -36,6 +36,7 @@
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <interpolation.h>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mp4_image_loader.hpp>
@@ -129,7 +130,7 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# valid tracks: " << select_valid_tracks();
   LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
 
-  calculate_descriptors();
+  extract_images();
   calculate_metrics();
 
   LOG(INFO) << "# combined landmarks: "
@@ -301,6 +302,12 @@ void BagProcessor::load_tracks() {
 
   if (f.is_open() and f.good()) {
 
+    std::unordered_map<size_t, size_t> image_id_to_ind{};
+
+    for (auto &&[i, cam] : enumerate(camera_)) {
+      image_id_to_ind[cam.image_id_] = i;
+    }
+
     nlohmann::json json_root = nlohmann::json::parse(f);
     const auto num_tracks{json_root["tracks"].size()};
 
@@ -335,12 +342,15 @@ void BagProcessor::load_tracks() {
       track.geodetic_origin_ = local_converter_.origin();
 
       for (auto &&json_det : json_track["occurrences"]) {
-
         Detection det{};
 
         det.image_id_ = json_det["frame"].get<int>();
-        det.timestamp_ = camera_[det.image_id_].timestamp_;
 
+        if (not image_id_to_ind.contains(det.image_id_)) {
+          continue;
+        }
+
+        det.timestamp_ = camera_[image_id_to_ind.at(det.image_id_)].timestamp_;
         // json_det["timestamp"].get<int64_t>() + set_.camera_gps_delta_;
         det.box_.x = json_det["bbox"][0].get<int>();
         det.box_.y = json_det["bbox"][1].get<int>();
@@ -354,6 +364,9 @@ void BagProcessor::load_tracks() {
         det.track_id_ = track_id;
         det.cumulative_length_ = 0.0;
         det.center_undistorted_ = calib_.undistort_point(det.center_);
+        det.enu_ = camera_[image_id_to_ind.at(det.image_id_)].enu_;
+        det.gps_ind_ = std::distance(
+            &camera_[0], &camera_[image_id_to_ind.at(det.image_id_)]);
 
         track.dets_.emplace_back(det);
         ++detection_id;
@@ -376,39 +389,6 @@ void BagProcessor::load_tracks() {
     double length{0.0};
 
     for (auto &&d : track.dets_) {
-
-      const auto it{
-          std::find_if(camera_.begin(), camera_.end(), [&d](const auto &cam) {
-            return cam.timestamp_ == d.timestamp_;
-          })};
-
-      // const auto it{
-      //     std::upper_bound(gps_.begin(), gps_.end(), d.timestamp_,
-      //                      [](const int64_t val, const GpsMeasurement &m) {
-      //                        return val < m.timestamp_;
-      //                      })};
-
-      if (it != camera_.end()) {
-        const auto ind{std::distance(camera_.begin(), it)};
-
-        d.enu_ = it->enu_;
-        d.gps_ind_ = ind;
-
-        // if (ind > 0) {
-
-        //   const auto t{
-        //       static_cast<double>(d.timestamp_ - gps_[ind - 1].timestamp_) /
-        //       static_cast<double>(gps_[ind].timestamp_ -
-        //                           gps_[ind - 1].timestamp_)};
-
-        //   if (t < 0.0 or t > 1.0) {
-        //     fmt::print("fuck\n");
-        //   }
-
-        //   d.enu_ = Eigen::Vector2d{gps_[ind - 1].enu_ * (1.0 - t) +
-        //                            gps_[ind].enu_ * t};
-        // }
-      }
 
       if (d.enu_.has_value()) {
         if (first_pose) {
@@ -511,8 +491,8 @@ void BagProcessor::load_measurements(const std::string_view path) {
             static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
             static_cast<int64_t>(image_msg.header.stamp.nanosec)};
 
-        camera.emplace_back(timestamp + set_.camera_gps_delta_,
-                            Eigen::Vector2d::Zero());
+        camera.emplace_back(CameraMeasurement{
+            .timestamp_ = timestamp + set_.camera_gps_delta_});
 
       } else if (msg->topic_name == set_.gps_topic_) {
         sensor_msgs::msg::NavSatFix gps_msg;
@@ -546,7 +526,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
     return a.timestamp_ < b.timestamp_;
   });
 
-  for (auto &&cam : camera) {
+  for (auto &&[i, cam] : enumerate(camera)) {
     const auto it{
         std::upper_bound(stable_gps_.begin(), stable_gps_.end(), cam.timestamp_,
                          [](const int64_t val, const GpsMeasurement &m) {
@@ -566,7 +546,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
         const Eigen::Vector2d enu{stable_gps_[ind - 1].enu_ * (1.0 - t) +
                                   stable_gps_[ind].enu_ * t};
 
-        camera_.emplace_back(cam.timestamp_, enu);
+        camera_.emplace_back(i, cam.timestamp_, enu);
       }
     }
   }
@@ -1678,9 +1658,9 @@ size_t BagProcessor::num_valid_tracks() const {
   });
 }
 
-void BagProcessor::calculate_descriptors() {
+void BagProcessor::extract_images() {
 
-  LOG(INFO) << "Calculating descriptors...";
+  LOG(INFO) << "Extracting images...";
 
   std::unordered_set<size_t> frames_to_extract{};
 
