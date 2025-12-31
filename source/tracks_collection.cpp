@@ -7,17 +7,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <feature_matcher.hpp>
 #include <flann/flann.hpp>
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <limits>
 #include <memory>
 #include <ng-log/logging.h>
+#include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <optional>
-#include <queue>
 #include <range/v3/algorithm/max.hpp>
 #include <range/v3/algorithm/minmax.hpp>
 #include <range/v3/range/conversion.hpp>
@@ -37,7 +38,6 @@
 #include <utility>
 #include <vector>
 
-using cv::Vec2f;
 using ranges::to;
 using ranges::views::enumerate;
 using ranges::views::filter;
@@ -63,18 +63,6 @@ struct GroupedDetections {
 
   std::unordered_map<std::string, std::vector<const Detection *>> dets_;
 };
-
-constexpr double constexpr_cos(double x) {
-  double cos{1.0};
-  double pow{x};
-
-  for (auto fac{1ull}, n{1ull}; n != 19; fac *= ++n, pow *= x) {
-    if ((n & 1) == 0)
-      cos += (n & 2 ? -pow : pow) / fac;
-  }
-
-  return cos;
-}
 
 std::tuple<size_t, size_t, double>
 start_closest_poses(const ImageTrack &track1, const ImageTrack &track2) {
@@ -155,7 +143,9 @@ size_t find_closest_index(Eigen::Vector2d p0, const ImageTrack &track) {
   double min_dist{std::numeric_limits<double>::max()};
   size_t min_ind{0};
 
-  for (auto &&[i, d] : track.dets_ | enumerate) {
+  for (auto &&i : track.selected_detections_) {
+
+    const auto &d{track.dets_[i]};
 
     if (not d.enu_.has_value()) {
       continue;
@@ -175,24 +165,11 @@ size_t find_closest_index(Eigen::Vector2d p0, const ImageTrack &track) {
 std::pair<size_t, size_t>
 find_closest_indices_both_direction(size_t index1, const ImageTrack &track1,
                                     const ImageTrack &track2) {
-
   const auto index2{
       find_closest_index(track1.dets_[index1].enu_.value(), track2)};
 
-  const auto dist1{
-      (track1.dets_[index1].enu_.value() - track2.dets_[index2].enu_.value())
-          .squaredNorm()};
-
   const auto index1_prime{
       find_closest_index(track2.dets_[index2].enu_.value(), track1)};
-
-  const auto dist2{(track1.dets_[index1_prime].enu_.value() -
-                    track2.dets_[index2].enu_.value())
-                       .squaredNorm()};
-
-  if (dist1 < dist2) {
-    return {index1, index2};
-  }
 
   return {index1_prime, index2};
 }
@@ -318,11 +295,13 @@ bool TracksCollection::should_be_linked(CombinedLandmarks::Link dst_link,
   MinMaxAccumulator dst_minmax{};
   MinMaxAccumulator src_minmax{};
 
-  if (not check_proximity(dst_link, src_track)) {
+  check_closest_box(dst_link, det_ind, src_track_id);
+
+  if (not check_landmarks_proximity(dst_link, src_track)) {
     return false;
   }
 
-  if (not check_closest_box_and_intersecton(dst_link, det_ind, src_track_id)) {
+  if (not check_intersecton(dst_link, det_ind, src_track_id)) {
     return false;
   }
 
@@ -617,7 +596,8 @@ public:
           continue;
         }
 
-        for (auto &&[det_ind, d] : enumerate(track.dets_)) {
+        for (auto &&det_ind : track.selected_detections_) {
+          const auto &d{track.dets_[det_ind]};
 
           if (not d.enu_.has_value()) {
             continue;
@@ -642,20 +622,23 @@ public:
   std::vector<FlattenedResult> find(const ImageTrack &track) {
 
     std::vector<size_t> other_track_indices{};
-    other_track_indices.reserve(track.dets_.size());
+    other_track_indices.reserve(track.selected_detections_.size());
 
-    for (auto &&[i, d] : enumerate(track.dets_)) {
+    for (auto &&det_ind : track.selected_detections_) {
 
-      if (not d.enu_.has_value()) {
+      if (not track.dets_[det_ind].enu_.has_value()) {
         continue;
       }
 
-      other_track_indices.push_back(i);
+      other_track_indices.push_back(det_ind);
     }
 
-    auto query_data{track.dets_ |
-                    filter([](const auto &d) { return d.enu_.has_value(); }) |
-                    transform([](const auto &d) {
+    auto query_data{track.selected_detections_ |
+                    filter([&track](const auto &det_ind) {
+                      return track.dets_[det_ind].enu_.has_value();
+                    }) |
+                    transform([&track](const auto &det_ind) {
+                      const auto &d{track.dets_[det_ind]};
                       return std::pair{d.enu_.value().x(), d.enu_.value().y()};
                     }) |
                     to<std::vector>()};
@@ -947,8 +930,8 @@ TracksCollection::try_link(CombinedLandmarks::Link link,
   return triangulate_on_boxes(track_points);
 }
 
-bool TracksCollection::check_proximity(CombinedLandmarks::Link link,
-                                       const ImageTrack &track) const {
+bool TracksCollection::check_landmarks_proximity(
+    CombinedLandmarks::Link link, const ImageTrack &track) const {
 
   if (not landmarks_.contain(link)) {
     return false;
@@ -961,21 +944,22 @@ bool TracksCollection::check_proximity(CombinedLandmarks::Link link,
   return (landmarks_.at(link).enu_ - track.landmark_->enu_).norm() < 20.0;
 }
 
-bool TracksCollection::check_closest_box_and_intersecton(
-    CombinedLandmarks::Link dst_link, std::span<const size_t> det_ind,
-    size_t src_track_id) const {
+bool TracksCollection::check_intersecton(CombinedLandmarks::Link dst_link,
+                                         std::span<const size_t> det_ind,
+                                         size_t src_track_id) {
 
   auto dst_bag{bags_[dst_link.bag_ind_]};
   const auto &dst_track{dst_bag->image_tracks_.at(dst_link.track_id_)};
   const auto &dst_dets{dst_track.dets_};
-  const auto &src_track{bags_.back()->image_tracks_.at(src_track_id)};
+  const auto &dst_calib{dst_bag->calib_};
+
+  auto src_bag{bags_.back()};
+  const auto &src_track{src_bag->image_tracks_.at(src_track_id)};
   const auto &src_dets{src_track.dets_};
+  const auto &src_calib{src_bag->calib_};
 
   MinMaxAccumulator dst_minmax{};
   MinMaxAccumulator src_minmax{};
-
-  // std::shared_ptr<BagLoader> dst_loader{};
-  // std::unordered_map<size_t, size_t> num_hits{};
 
   std::unordered_set<std::pair<size_t, size_t>, decltype([](const auto &p) {
                        size_t seed{0};
@@ -996,62 +980,8 @@ bool TracksCollection::check_closest_box_and_intersecton(
 
     taken.insert({src_ind, dst_ind});
 
-#if 0
-    {
-      if ((src_track_id == 98 or src_track_id == 99) and
-          dst_link.track_id_ == 80) {
-
-        dst_loader = std::make_shared<BagLoader>(BagLoader::Settings{
-            .compressed_image_topic_ = dst_bag->set_.compressed_image_topic_,
-            .path_to_bag_ = dst_bag->set_.bag_path_,
-            .timestamp_delta_ = dst_bag->set_.camera_gps_delta_,
-            .rec_ = {}});
-
-        auto img = dst_loader->load_image(dst_dets[dst_ind].timestamp_ -
-                                          dst_bag->set_.camera_gps_delta_);
-
-        cv::rectangle(img, dst_dets[dst_ind].box_, cv::Scalar(0, 255, 0), 2);
-        cv::rectangle(img, src_dets[src_ind].box_, cv::Scalar(255, 0, 0), 2);
-
-        cv::imwrite(fmt::format("/root/data/images/{}_{}_{}_{}.png",
-                                src_track_id, dst_link.track_id_, src_ind,
-                                dst_ind),
-                    img);
-      }
-    }
-#endif
-
-    const auto &this_timestamp_dets{
-        dst_bag->image_detections_.at(dst_dets[dst_ind].timestamp_).dets_};
-
-    const auto src_center{src_dets[src_ind].center_undistorted_};
-
-    double min_dist{std::numeric_limits<double>::max()};
-    size_t closest_track{0};
-
-    for (auto &d : this_timestamp_dets) {
-      if (d->code_ == src_track.code_) {
-
-        if (d->enu_.has_value()) {
-          const auto dist{
-              cv::norm(Vec2f{d->center_undistorted_}, cv::Vec2f{src_center})};
-
-          if (dist < min_dist) {
-            min_dist = dist;
-            closest_track = d->track_id_;
-          }
-        }
-      }
-    }
-
     dst_minmax.add(dst_track.dets_[dst_ind].cumulative_length_);
     src_minmax.add(src_track.dets_[src_ind].cumulative_length_);
-
-    if (closest_track != dst_link.track_id_) {
-      return false;
-    }
-
-    // ++num_hits[closest_track];
   }
 
   const auto dst_length_ratio{dst_minmax.delta() / dst_track.length_};
@@ -1061,14 +991,235 @@ bool TracksCollection::check_closest_box_and_intersecton(
                                 src_length_ratio >= 0.5};
 
   return track_intersection;
+}
 
-  // const auto track_with_max_hits{
-  //     std::max_element(
-  //         num_hits.begin(), num_hits.end(),
-  //         [](const auto &a, const auto &b) { return a.second < b.second; })
-  //         ->first};
+bool TracksCollection::check_closest_box(CombinedLandmarks::Link dst_link,
+                                         std::span<const size_t> det_ind,
+                                         size_t src_track_id) {
 
-  // return track_with_max_hits == dst_link.track_id_;
+  auto dst_bag{bags_[dst_link.bag_ind_]};
+  const auto &dst_track{dst_bag->image_tracks_.at(dst_link.track_id_)};
+  const auto &dst_dets{dst_track.dets_};
+  const auto &dst_calib{dst_bag->calib_};
+
+  auto src_bag{bags_.back()};
+  const auto &src_track{src_bag->image_tracks_.at(src_track_id)};
+  const auto &src_dets{src_track.dets_};
+  const auto &src_calib{src_bag->calib_};
+
+  const auto dst_dets_ind_with_images{
+      det_ind | filter([&dst_dets, &dst_bag](const size_t &i) {
+        return dst_bag->selected_frames_.contains(dst_dets[i].image_id_);
+      }) |
+      to<std::vector>()};
+
+  const auto src_dets_ind_with_images{
+      src_dets | enumerate | filter([&src_bag](const auto &val) {
+        return src_bag->selected_frames_.contains(std::get<1>(val).image_id_);
+      }) |
+      transform([](const auto &val) { return std::get<0>(val); }) |
+      to<std::vector>()};
+
+  if (dst_dets_ind_with_images.empty() or src_dets_ind_with_images.empty()) {
+    return true;
+  }
+
+  auto find_closest = [&](size_t dst_det_ind) {
+    auto p0{dst_dets[dst_det_ind].enu_.value()};
+
+    double min_dist{std::numeric_limits<double>::max()};
+    size_t min_ind{0};
+
+    for (auto &src_det_ind : src_dets_ind_with_images) {
+      const auto d{(p0 - src_dets[src_det_ind].enu_.value()).squaredNorm()};
+
+      if (min_dist > d) {
+        min_dist = d;
+        min_ind = src_det_ind;
+      }
+    }
+
+    const size_t src_ind{min_ind};
+
+    p0 = src_dets[min_ind].enu_.value();
+    min_dist = std::numeric_limits<double>::max();
+    min_ind = 0;
+
+    for (auto &dst_det_ind : dst_dets_ind_with_images) {
+      const auto d{(p0 - dst_dets[dst_det_ind].enu_.value()).squaredNorm()};
+
+      if (min_dist > d) {
+        min_dist = d;
+        min_ind = dst_det_ind;
+      }
+    }
+
+    return std::pair{min_ind, src_ind};
+  };
+
+  std::unordered_set<std::pair<size_t, size_t>, decltype([](const auto &p) {
+                       size_t seed{0};
+                       boost::hash_combine(seed, p.first);
+                       boost::hash_combine(seed, p.second);
+                       return seed;
+                     })>
+      taken{};
+
+  size_t num_ambiguites{0};
+  size_t too_far_away{0};
+
+  for (auto &&dst_det_ind : dst_dets_ind_with_images) {
+    const auto [dst_ind, src_ind] = find_closest(dst_det_ind);
+
+    if (taken.contains({dst_ind, src_ind})) {
+      continue;
+    }
+
+    taken.insert({dst_ind, src_ind});
+
+    const auto x_dist{std::abs(dst_dets[dst_ind].center_undistorted_.x /
+                                   dst_bag->calib_.camera_resolution_.x() -
+                               src_dets[src_ind].center_undistorted_.x /
+                                   src_bag->calib_.camera_resolution_.x())};
+
+    if (x_dist > 0.3) {
+      ++too_far_away;
+    }
+
+    const auto &this_timestamp_dets{
+        dst_bag->image_detections_.at(dst_dets[dst_ind].timestamp_).dets_};
+
+    int num_candidates{0};
+
+    for (auto &d : this_timestamp_dets) {
+      if (d->code_ == src_track.code_) {
+        ++num_candidates;
+      }
+    }
+
+    if (num_candidates > 1) {
+      ++num_ambiguites;
+    }
+  }
+
+  const auto too_faw_away_ratio{static_cast<float>(too_far_away) /
+                                static_cast<float>(taken.size())};
+
+  if (too_faw_away_ratio > 0.7f) {
+    return false;
+  }
+
+  const auto ambiguites_ratio{static_cast<float>(num_ambiguites) /
+                              static_cast<float>(taken.size())};
+
+  if (ambiguites_ratio > 0.2f) {
+
+    size_t num_mismatches{0};
+    size_t num_checked{0};
+
+    for (auto &&[dst_ind, src_ind] : taken) {
+
+      const auto tag1{fmt::format("bag_{}_image_{}", dst_link.bag_ind_,
+                                  dst_dets[dst_ind].image_id_)};
+
+      const auto tag2{fmt::format("bag_{}_image_{}", bags_.size() - 1,
+                                  src_dets[src_ind].image_id_)};
+
+      if (matcher_.estimate_homography(
+              dst_bag->selected_frames_.at(dst_dets[dst_ind].image_id_),
+              dst_calib, tag1,
+              src_bag->selected_frames_.at(src_dets[src_ind].image_id_),
+              src_calib, tag2)) {
+
+        const auto &this_timestamp_dets{
+            dst_bag->image_detections_.at(dst_dets[dst_ind].timestamp_).dets_};
+
+        const auto src_center{cv::Vec2f{src_dets[src_ind].center_undistorted_}};
+
+        std::vector<cv::Point2f> dst_points{};
+        std::vector<size_t> track_ids;
+
+        for (auto &d : this_timestamp_dets) {
+          if (d->code_ == src_track.code_) {
+            dst_points.push_back(d->center_undistorted_);
+            track_ids.push_back(d->track_id_);
+          }
+        }
+
+        const auto projected_points{
+            matcher_.warp_points(dst_points, tag1, tag2)};
+#if 1
+        if (src_track_id == 39 and dst_link.track_id_ == 14) {
+          auto &buf{src_bag->selected_frames_.at(src_dets[src_ind].image_id_)};
+
+          cv::Mat_<uint8_t> img = cv::imdecode(
+              {buf.data(), static_cast<int>(buf.size())}, cv::IMREAD_GRAYSCALE);
+
+          cv::Mat_<cv::Vec3b> img_clr{};
+          cv::cvtColor(img, img_clr, cv::COLOR_GRAY2BGR);
+
+          for (auto &&p : projected_points) {
+            cv::circle(img_clr, p, 10, {0.0, 0.0, 255.0}, cv::FILLED,
+                       cv::LINE_AA);
+          }
+
+          cv::circle(img_clr, src_dets[src_ind].center_undistorted_, 10,
+                     {0.0, 255.0, 0.0}, cv::FILLED, cv::LINE_AA);
+
+          const auto dst_center{matcher_.warp_points(
+              {dst_dets[dst_ind].center_undistorted_}, tag1, tag2)};
+
+          cv::circle(img_clr, dst_center.front(), 10, {0.0, 255.0, 255.0},
+                     cv::FILLED, cv::LINE_AA);
+
+          cv::imwrite("/root/data/comparison/projection.png", img_clr);
+
+          buf = dst_bag->selected_frames_.at(dst_dets[dst_ind].image_id_);
+          img = cv::imdecode({buf.data(), static_cast<int>(buf.size())},
+                             cv::IMREAD_GRAYSCALE);
+          cv::cvtColor(img, img_clr, cv::COLOR_GRAY2BGR);
+
+          cv::circle(img_clr, dst_dets[dst_ind].center_, 10, {0.0, 255.0, 0.0},
+                     cv::FILLED, cv::LINE_AA);
+
+          cv::imwrite("/root/data/comparison/dst_img.png", img_clr);
+
+          log_track_map(rec_, dst_track, {255, 0, 0}, "map/dst");
+          log_track_map(rec_, src_track, {0, 255, 0}, "map/src");
+          log_segment(rec_, dst_track, src_track, dst_ind, src_ind);
+        }
+#endif
+        size_t closest_track{0};
+        double min_dist{std::numeric_limits<double>::max()};
+
+        for (auto &&[p, id] : zip(projected_points, track_ids)) {
+          const auto dist{cv::norm(cv::Vec2f{p}, src_center)};
+
+          if (dist < min_dist) {
+            min_dist = dist;
+            closest_track = id;
+          }
+        }
+
+        if (closest_track != dst_link.track_id_) {
+          ++num_mismatches;
+        }
+
+        ++num_checked;
+      }
+    }
+
+    if (num_checked == 0) {
+      return false;
+    }
+
+    const auto mismatches_ratio{static_cast<float>(num_mismatches) /
+                                static_cast<float>(num_checked)};
+
+    return mismatches_ratio < 0.2f;
+  }
+
+  return true;
 }
 
 void TracksCollection::log_current_state() const {

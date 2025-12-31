@@ -5,6 +5,7 @@
 #include <boost/container_hash/hash.hpp>
 #include <cartesian_converter.hpp>
 #include <cstddef>
+#include <feature_matcher.hpp>
 #include <memory>
 #include <rerun.hpp>
 #include <serialization.hpp>
@@ -83,12 +84,14 @@ private:
   std::optional<Landmark> try_link(CombinedLandmarks::Link link,
                                    const ImageTrack &new_track) const;
 
-  bool check_proximity(CombinedLandmarks::Link link,
-                       const ImageTrack &track) const;
+  bool check_landmarks_proximity(CombinedLandmarks::Link link,
+                                 const ImageTrack &track) const;
 
-  bool check_closest_box_and_intersecton(CombinedLandmarks::Link dst_link,
-                                         std::span<const size_t> det_ind,
-                                         size_t src_track_id) const;
+  bool check_intersecton(CombinedLandmarks::Link dst_link,
+                         std::span<const size_t> det_ind, size_t src_track_id);
+
+  bool check_closest_box(CombinedLandmarks::Link dst_link,
+                         std::span<const size_t> det_ind, size_t src_track_id);
 
   void combine_landmarks(std::span<const size_t> affected_landmarks);
 
@@ -103,5 +106,6 @@ private:
   std::vector<BagProcessor::ptr> bags_;
   CartesianConverter converter_;
   CombinedLandmarks landmarks_;
+  FeatureMatcher matcher_;
   std::shared_ptr<rerun::RecordingStream> rec_;
 };

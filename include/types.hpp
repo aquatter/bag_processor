@@ -234,13 +234,7 @@ struct CameraMeasurement {
 struct Descriptors {
   size_t image_id_;
   cv::Mat_<uint8_t> descriptors_;
-  std::vector<cv::Point2f> keypoints_;
-
-  template <typename Archive> void serialize(Archive &ar, const unsigned int) {
-    ar & image_id_;
-    ar & descriptors_;
-    ar & keypoints_;
-  }
+  std::vector<cv::KeyPoint> keypoints_;
 };
 
 struct LoaderBase {
@@ -259,3 +253,15 @@ struct LoaderBase {
   virtual ~LoaderBase() = default;
   std::function<void()> prog_;
 };
+
+inline constexpr double constexpr_cos(double x) {
+  double cos{1.0};
+  double pow{x};
+
+  for (auto fac{1ull}, n{1ull}; n != 19; fac *= ++n, pow *= x) {
+    if ((n & 1) == 0)
+      cos += (n & 2 ? -pow : pow) / fac;
+  }
+
+  return cos;
+}

@@ -22,6 +22,8 @@ find_package(ng-log REQUIRED)
 find_package(flann REQUIRED)
 find_package(OpenMP COMPONENTS CXX REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(Arrow REQUIRED)
+find_package(Parquet REQUIRED)
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat
@@ -58,6 +60,8 @@ add_executable(${PROJECT_NAME}
     source/cartesian_converter.cpp
     source/mp4_image_loader.cpp
     source/extract_frames.cpp
+    source/feature_matcher.cpp
+    source/track_merger.cpp
     ${ALGLIB_SOURCES}
 )
 
@@ -80,6 +84,8 @@ target_link_libraries(${PROJECT_NAME}
     flann::flann
     OpenMP::OpenMP_CXX
     gpmf-extractor
+    Arrow::arrow_shared
+    Parquet::parquet_shared
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -107,10 +113,15 @@ add_executable(combine_bags
     source/tracks_collection.cpp
     source/rerun_logging.cpp
     source/cartesian_converter.cpp
+    source/feature_matcher.cpp
+    source/mp4_image_loader.cpp
+    source/extract_frames.cpp
+    source/track_merger.cpp
     ${ALGLIB_SOURCES}
 )
 
 target_link_libraries(combine_bags
+    PkgConfig::FFMPEG
     ${OpenCV_LIBS}
     fmt::fmt
     rcl::rcl
@@ -128,6 +139,8 @@ target_link_libraries(combine_bags
     flann::flann
     OpenMP::OpenMP_CXX
     gpmf-extractor
+    Arrow::arrow_shared
+    Parquet::parquet_shared
 )
 
 target_include_directories(combine_bags PRIVATE
@@ -170,8 +183,8 @@ target_link_options(test_matching PRIVATE -Wl,--no-as-needed)
 target_link_libraries(test_matching PRIVATE
     PkgConfig::FFMPEG
     ${OpenCV_LIBS}
-    # fmt::fmt
-    # range-v3::range-v3 range-v3::meta range-v3::concepts
+    fmt::fmt
+    range-v3::range-v3 range-v3::meta range-v3::concepts
     # yaml-cpp::yaml-cpp
     # ng-log::ng-log
     # OpenMP::OpenMP_CXX

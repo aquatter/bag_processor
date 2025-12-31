@@ -1679,9 +1679,9 @@ void BagProcessor::extract_images() {
       std::unordered_map<std::string, int> class_count{};
 
       for (auto &&det :
-           image_detections_[track.dets_[det_ind].timestamp_].dets_) {
+           image_detections_.at(track.dets_[det_ind].timestamp_).dets_) {
 
-        ++class_count[det->class_];
+        ++class_count[det->code_];
       }
 
       for (auto &&[class_id, count] : class_count) {

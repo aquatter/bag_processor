@@ -3,6 +3,7 @@
 // #include <GeographicLib/UTMUPS.hpp>
 
 // clang-format off
+#include <unordered_map>
 extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/rational.h>
@@ -19,9 +20,10 @@ extern "C" {
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <fmt/core.h>
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <iostream>
-// #include <fmt/core.h>
-// #include <fmt/format.h>
 // #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -37,6 +39,19 @@ extern "C" {
 // using ranges::views::enumerate;
 // using ranges::views::filter;
 // using ranges::views::transform;
+#include <range/v3/range/conversion.hpp>
+#include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/filter.hpp>
+#include <range/v3/view/join.hpp>
+#include <range/v3/view/reverse.hpp>
+#include <range/v3/view/transform.hpp>
+
+using ranges::to;
+using ranges::views::enumerate;
+using ranges::views::filter;
+using ranges::views::join;
+using ranges::views::reverse;
+using ranges::views::transform;
 
 #if 0 
 
@@ -175,7 +190,36 @@ cv::Mat_<uint8_t> to_bgr(const AVFrame *frame, SwsContext *sws, int w, int h) {
   return img;
 }
 
+struct TestStruct {
+  std::vector<int> data_;
+};
+
 int main(int argc, const char **argv) {
+
+  {
+    std::unordered_map<int, TestStruct> m{};
+
+    m[0] = TestStruct{.data_ = {0, 1, 2}};
+    m[1] = TestStruct{.data_ = {3, 4}};
+    m[2] = TestStruct{.data_ = {5, 6, 7, 8}};
+
+    const std::vector<int> res{
+        join((m | transform([](const std::pair<int, TestStruct> &val) {
+                return val.second.data_ |
+                       filter([](auto &&val) { return true; }) |
+                       to<std::vector>();
+              }))) |
+        to<std::vector>()};
+
+    const std::vector<int> res2{m[0].data_ | reverse | to<std::vector>()};
+
+    fmt::print("{}\n", fmt::join(res, ", "));
+    fmt::print("{}\n", fmt::join(res2, ", "));
+
+    for (auto &&val : m) {
+      fmt::print("{}\n", fmt::join(val.second.data_, ", "));
+    }
+  }
 
   try {
 #if 1

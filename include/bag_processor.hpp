@@ -56,8 +56,9 @@ struct BagProcessorSettings {
 
 class TrackIndexer;
 class TracksCollection;
+class TrackMerger;
 
-class BagProcessor {
+class BagProcessor : public std::enable_shared_from_this<BagProcessor> {
 public:
   using ptr = std::shared_ptr<BagProcessor>;
 
@@ -145,6 +146,7 @@ private:
 
   friend class TrackIndexer;
   friend class TracksCollection;
+  friend class TrackMerger;
   friend class boost::serialization::access;
 
   template <typename Archive> void serialize(Archive &ar, const unsigned int) {
