@@ -7,6 +7,8 @@ class BagProcessor;
 class TrackMerger {
 public:
   TrackMerger(std::shared_ptr<BagProcessor> bag);
+  void process();
+
   ~TrackMerger();
 
 private:

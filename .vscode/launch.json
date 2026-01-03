@@ -11,9 +11,16 @@
             "program": "${command:cmake.launchTargetPath}",
             "args": [
                 "-i",
-                "~/data/domodedovo/gopro_01_11/archive.bin",
-                "~/data/domodedovo/video_domodedovo/archive.bin",
-                "--use-logger"
+                "/root/data/records/20/",
+                "-a",
+                "/root/data/records/20/20.json",
+                "-c",
+                "/root/data/records/GX010005-camchain.yaml",
+                "--session-name",
+                "lomakin_20",
+                "--gopro-mode",
+                "-o",
+                "/root/data/records/20/"
                 // "-i",
                 // "~/data/domodedovo/gopro_01_11/GX010004.MP4",
                 // "-a",

@@ -1,10 +1,12 @@
 #include <bag_processor.hpp>
 #include <boost/math/constants/constants.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <feature_matcher.hpp>
 #include <flann/flann.hpp>
 #include <fmt/format.h>
 #include <memory>
+#include <mp4_image_loader.hpp>
 #include <opencv2/core.hpp>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
@@ -44,7 +46,8 @@ struct TrackMerger::impl {
   };
 
   impl(std::shared_ptr<BagProcessor> bag)
-      : bag_{bag}, indexer_{flann::KDTreeSingleIndexParams{}} {
+      : bag_{bag}, indexer_{flann::KDTreeSingleIndexParams{}},
+        image_loader_{bag_->set_.bag_path_} {
 
     for (auto &&[track_id, track] : bag->image_tracks_) {
       if (not track.valid_) {
@@ -75,6 +78,10 @@ struct TrackMerger::impl {
     std::vector<std::pair<size_t, size_t>> link_result{};
 
     for (auto &&[src_track_id, track] : bag_->image_tracks_) {
+      if (not track.valid_) {
+        continue;
+      }
+
       const auto found_tracks{find(track)};
 
       for (auto &&index_result : found_tracks) {
@@ -220,52 +227,55 @@ struct TrackMerger::impl {
         const auto dst_image_id{dst_dets[dst_det_ind].image_id_};
         const auto src_image_id{src_dets[src_det_ind].image_id_};
 
-        if (bag_->selected_frames_.contains(dst_image_id) and
-            bag_->selected_frames_.contains(src_image_id)) {
+        if (not image_cache_.contains(dst_image_id)) {
+          image_cache_[dst_image_id] = image_loader_.load_image(dst_image_id);
+        }
 
-          if (matcher_.estimate_homography(
-                  bag_->selected_frames_.at(dst_image_id), bag_->calib_, tag1,
-                  bag_->selected_frames_.at(src_image_id), bag_->calib_,
-                  tag2)) {
+        if (not image_cache_.contains(src_image_id)) {
+          image_cache_[src_image_id] = image_loader_.load_image(src_image_id);
+        }
 
-            const auto &this_timestamp_dets{
-                bag_->image_detections_.at(dst_dets[dst_det_ind].timestamp_)
-                    .dets_};
+        if (matcher_.estimate_homography(
+                image_cache_.at(dst_image_id), bag_->calib_, tag1,
+                image_cache_.at(src_image_id), bag_->calib_, tag2)) {
 
-            const auto src_center{
-                cv::Vec2f{src_dets[src_det_ind].center_undistorted_}};
+          const auto &this_timestamp_dets{
+              bag_->image_detections_.at(dst_dets[dst_det_ind].timestamp_)
+                  .dets_};
 
-            std::vector<cv::Point2f> dst_points{};
-            std::vector<size_t> track_ids;
+          const auto src_center{
+              cv::Vec2f{src_dets[src_det_ind].center_undistorted_}};
 
-            for (auto &d : this_timestamp_dets) {
-              if (d->code_ == src_track.code_) {
-                dst_points.push_back(d->center_undistorted_);
-                track_ids.push_back(d->track_id_);
-              }
+          std::vector<cv::Point2f> dst_points{};
+          std::vector<size_t> track_ids;
+
+          for (auto &d : this_timestamp_dets) {
+            if (d->code_ == src_track.code_) {
+              dst_points.push_back(d->center_undistorted_);
+              track_ids.push_back(d->track_id_);
             }
-
-            const auto projected_points{
-                matcher_.warp_points(dst_points, tag1, tag2)};
-
-            size_t closest_track{0};
-            double min_dist{std::numeric_limits<double>::max()};
-
-            for (auto &&[p, id] : zip(projected_points, track_ids)) {
-              const auto dist{cv::norm(cv::Vec2f{p}, src_center)};
-
-              if (dist < min_dist) {
-                min_dist = dist;
-                closest_track = id;
-              }
-            }
-
-            if (closest_track != dst_track.id_) {
-              ++num_mismatches;
-            }
-
-            ++num_checked;
           }
+
+          const auto projected_points{
+              matcher_.warp_points(dst_points, tag1, tag2)};
+
+          size_t closest_track{0};
+          double min_dist{std::numeric_limits<double>::max()};
+
+          for (auto &&[p, id] : zip(projected_points, track_ids)) {
+            const auto dist{cv::norm(cv::Vec2f{p}, src_center)};
+
+            if (dist < min_dist) {
+              min_dist = dist;
+              closest_track = id;
+            }
+          }
+
+          if (closest_track != dst_track.id_) {
+            ++num_mismatches;
+          }
+
+          ++num_checked;
         }
       }
     } else {
@@ -290,9 +300,13 @@ struct TrackMerger::impl {
       constexpr_cos(boost::math::double_constants::degree * 15.0)};
 
   FeatureMatcher matcher_;
+  Mp4ImageLoader image_loader_;
+  std::unordered_map<size_t, std::vector<uint8_t>> image_cache_;
 };
 
 TrackMerger::TrackMerger(std::shared_ptr<BagProcessor> bag)
     : pimpl_{std::make_unique<impl>(bag)} {}
 
 TrackMerger::~TrackMerger() = default;
+
+void TrackMerger::process() { pimpl_->process(); }

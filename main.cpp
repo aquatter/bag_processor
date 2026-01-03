@@ -119,22 +119,22 @@ int main(const int argc, const char *const *argv) {
     CLI11_PARSE(app, argc, argv);
 
     set.use_klt_ = false;
-    BagProcessor bag_proc{set};
+    auto bag_proc{std::make_shared<BagProcessor>(set)};
 
     if (set.use_logger_) {
       auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
       rec->connect_grpc().exit_on_failure();
-      bag_proc.set_rerun(rec);
+      bag_proc->set_rerun(rec);
     }
 
-    bag_proc.calculate();
+    bag_proc->calculate();
 
     if (eval_metrics) {
-      bag_proc.calculate_metrics(
+      bag_proc->calculate_metrics(
           fmt::format("{}/prec_recall.json", output_path));
     }
 
-    bag_proc.save(fmt::format("{}/archive.bin", output_path));
+    bag_proc->save(fmt::format("{}/archive.bin", output_path));
 
   } catch (const std::exception &ex) {
     LOG(ERROR) << ex.what();

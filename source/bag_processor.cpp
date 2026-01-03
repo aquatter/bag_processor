@@ -61,6 +61,7 @@
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/drop.hpp>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/filter.hpp>
 #include <range/v3/view/iota.hpp>
 #include <range/v3/view/linear_distribute.hpp>
 #include <range/v3/view/take.hpp>
@@ -79,7 +80,8 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <stdexcept>
 #include <string>
-#include <thread>
+#include <threads.hpp>
+#include <track_merger.hpp>
 #include <tracker.h>
 #include <triangulation.hpp>
 #include <types.hpp>
@@ -94,6 +96,7 @@
 using ranges::to;
 using ranges::views::drop;
 using ranges::views::enumerate;
+using ranges::views::filter;
 using ranges::views::ints;
 using ranges::views::linear_distribute;
 using ranges::views::take;
@@ -129,6 +132,9 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# detections: " << image_detections_.size();
   LOG(INFO) << "# valid tracks: " << select_valid_tracks();
   LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
+
+  TrackMerger merger{shared_from_this()};
+  merger.process();
 
   extract_images();
   calculate_metrics();
@@ -648,7 +654,7 @@ cv::Mat_<cv::Vec3b> BagProcessor::load_image(int64_t timestamp) const {
 }
 
 std::optional<Eigen::Isometry3d>
-BagProcessor::estimate_camera_pos(Detection &d) {
+BagProcessor::estimate_camera_pos(Detection &d) const {
   const auto [points_in_the_radius, direction] = get_points_in_the_radius(
       camera_, search_radius_, d.enu_.value(), d.gps_ind_);
 
@@ -1262,8 +1268,39 @@ BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
 
 size_t BagProcessor::triangulate_tracks() {
 
-  size_t num_triangulated{0};
+  std::atomic_size_t num_triangulated{0};
 
+  const auto valid_track_ids{
+      image_tracks_ | filter([](auto &&val) { return val.second.valid_; }) |
+      transform([](auto &&val) { return val.first; }) | to<std::vector>()};
+
+  std::vector<ProgressBar::ProgressInfo> topics{
+      ProgressBar::ProgressInfo{.message_count_ = valid_track_ids.size(),
+                                .processed_count_ = 0,
+                                .topic_name_ = "track# ",
+                                .ind_ = 0}};
+
+  ProgressBar progress{topics};
+  progress.draw();
+
+  RunInThreads{static_cast<int>(valid_track_ids.size())}(
+      [this, &valid_track_ids, &num_triangulated,
+       &progress](const RunInThreads::Context &ctx) {
+        for (auto &&i : ints(ctx.beg_, ctx.end_)) {
+          auto &track{image_tracks_.at(valid_track_ids[i])};
+          triangulate(track);
+
+          if (track.landmark_.has_value()) {
+            num_triangulated.fetch_add(1);
+          }
+
+          progress.advance("track# ");
+        }
+      });
+
+  progress.done();
+
+#if 0 
   for (auto &&[track_id, track] : image_tracks_) {
 
     if (not track.valid_) {
@@ -1273,14 +1310,14 @@ size_t BagProcessor::triangulate_tracks() {
     triangulate(track);
 
     if (not track.landmark_.has_value()) {
-      LOG(WARNING) << "unable to triangulate track " << track_id;
+      // LOG(WARNING) << "unable to triangulate track " << track_id;
     } else {
       ++num_triangulated;
     }
   }
+#endif
 
-  LOG(INFO) << "num triangulated tracks: " << num_triangulated;
-  return num_triangulated;
+  return num_triangulated.load();
 }
 
 float BagProcessor::estimate_azimuth(const Eigen::Isometry3d pose,
@@ -1301,8 +1338,73 @@ float BagProcessor::estimate_azimuth(const Eigen::Isometry3d pose,
 
 size_t BagProcessor::select_valid_tracks() {
 
-  size_t num_valid_tracks{0};
+  std::vector<ProgressBar::ProgressInfo> topics{
+      ProgressBar::ProgressInfo{.message_count_ = image_tracks_.size(),
+                                .processed_count_ = 0,
+                                .topic_name_ = "track# ",
+                                .ind_ = 0}};
 
+  ProgressBar progress{topics};
+  progress.draw();
+
+  std::atomic_size_t num_valid_tracks{0};
+
+  const auto track_ids{image_tracks_ |
+                       transform([](auto &&val) { return val.first; }) |
+                       to<std::vector>()};
+
+  RunInThreads{static_cast<int>(track_ids.size())}(
+      [this, &track_ids, &num_valid_tracks,
+       &progress](const RunInThreads::Context &ctx) {
+        for (auto &&i : ints(ctx.beg_, ctx.end_)) {
+
+          Eigen::Vector2d prev_camera_pose{Eigen::Vector2d::Zero()};
+          bool first_pose{true};
+
+          float min_angle{360.0f};
+          float max_angle{0.0f};
+
+          auto &track{image_tracks_.at(track_ids[i])};
+
+          for (auto &&d : track.dets_) {
+
+            if (not d.enu_.has_value()) {
+              continue;
+            }
+
+            const auto camera_pos{estimate_camera_pos(d)};
+
+            if (camera_pos.has_value()) {
+
+              const float angle{estimate_azimuth(
+                  camera_pos.value(),
+                  {d.center_undistorted_.x, d.center_undistorted_.y})};
+
+              min_angle = std::min(min_angle, angle);
+              max_angle = std::max(max_angle, angle);
+
+              d.cam_to_world_ = camera_pos;
+              d.angle_ = angle;
+            }
+          }
+
+          const float delta_angle{max_angle - min_angle > 180.0f
+                                      ? 360.0f - (max_angle - min_angle)
+                                      : max_angle - min_angle};
+
+          track.delta_angle_ = delta_angle;
+
+          if (delta_angle >= angle_threshold_deg_) {
+            track.valid_ = true;
+            num_valid_tracks.fetch_add(1);
+          } else {
+            track.valid_ = false;
+          }
+
+          progress.advance("track# ");
+        }
+      });
+#if 0
   for (auto &&[track_id, track] : image_tracks_) {
     Eigen::Vector2d prev_camera_pose{Eigen::Vector2d::Zero()};
     bool first_pose{true};
@@ -1357,11 +1459,14 @@ size_t BagProcessor::select_valid_tracks() {
       track.valid_ = false;
     }
   }
+#endif
 
-  return num_valid_tracks;
+  progress.done();
+
+  return num_valid_tracks.load();
 }
 
-void BagProcessor::triangulate(ImageTrack &track) {
+void BagProcessor::triangulate(ImageTrack &track) const {
 
   if (not track.valid_) {
     return;
@@ -1404,7 +1509,7 @@ void BagProcessor::triangulate(ImageTrack &track) {
 
     if (not landmark.has_value()) {
       track.valid_ = false;
-      LOG(WARNING) << "unable to triangulate landmark: " << track.id_;
+      // LOG(WARNING) << "unable to triangulate landmark: " << track.id_;
       return;
     }
 

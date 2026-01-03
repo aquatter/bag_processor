@@ -121,8 +121,8 @@ private:
 
   cv::Mat_<cv::Vec3b> load_image(int64_t timestamp) const;
   std::optional<Eigen::Isometry3d> estimate_camera_pos(int64_t timestamp) const;
-  std::optional<Eigen::Isometry3d> estimate_camera_pos(Detection &d);
-  void triangulate(ImageTrack &track);
+  std::optional<Eigen::Isometry3d> estimate_camera_pos(Detection &d) const;
+  void triangulate(ImageTrack &track) const;
   void collect_detections();
   void track_features();
   void change_angle(double angle_deg);

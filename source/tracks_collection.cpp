@@ -543,7 +543,7 @@ bool should_be_linked(const GroupedDetections::map_type &dst_detections,
         dst_center.y *= norm_h1;
 
         const auto dist{
-            cv::norm(Vec2f{d->center_undistorted_}, cv::Vec2f{src_center})};
+            cv::norm(cv::Vec2f{d->center_undistorted_}, cv::Vec2f{src_center})};
 
         if (dist < min_dist) {
           min_dist = dist;
