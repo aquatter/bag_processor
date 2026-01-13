@@ -29,6 +29,7 @@ extern "C" {
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#include <rerun.hpp>
 // #include <opencv2/features2d.hpp>
 // #include <range/v3/view/enumerate.hpp>
 // #include <range/v3/view/filter.hpp>
@@ -39,6 +40,7 @@ extern "C" {
 // using ranges::views::enumerate;
 // using ranges::views::filter;
 // using ranges::views::transform;
+#include <geo_json.hpp>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/filter.hpp>
@@ -123,6 +125,7 @@ cv::Mat_<double> estimate_homography(const cv::Mat_<cv::Vec3b> &img1,
 
 #endif
 
+#if 0
 void ffcheck(int err) {
   if (err < 0) {
     char buf[AV_ERROR_MAX_STRING_SIZE];
@@ -194,35 +197,72 @@ struct TestStruct {
   std::vector<int> data_;
 };
 
+#endif
+
 int main(int argc, const char **argv) {
 
   {
-    std::unordered_map<int, TestStruct> m{};
+    GeoJson geo_json{};
+    geo_json.add_element(
+        GeoJson::Circle{}
+            .with_size(10.0)
+            .with_coordinate_latlon({41.32241726406065, 69.28217597975674})
+            .with_stroke_color("#002791")
+            .with_stroke_opacity(0.8)
+            .with_fill_color("#2957d5")
+            .with_fill_opacity(0.3)
+            .with_stroke_width(1));
 
-    m[0] = TestStruct{.data_ = {0, 1, 2}};
-    m[1] = TestStruct{.data_ = {3, 4}};
-    m[2] = TestStruct{.data_ = {5, 6, 7, 8}};
+    geo_json.add_element(
+        GeoJson::Square{}
+            .with_size(7.0)
+            .with_coordinate_latlon({41.32241726406065, 69.28217597975674})
+            .with_stroke_color("#910000")
+            .with_stroke_opacity(0.8)
+            .with_fill_color("#d66a6a")
+            .with_fill_opacity(0.3)
+            .with_stroke_width(1));
 
-    const std::vector<int> res{
-        join((m | transform([](const std::pair<int, TestStruct> &val) {
-                return val.second.data_ |
-                       filter([](auto &&val) { return true; }) |
-                       to<std::vector>();
-              }))) |
-        to<std::vector>()};
+    geo_json.add_element(
+        GeoJson::Line{}
+            .with_coordinates_latlon({41.32258544462388, 69.28202661985105},
+                                     {41.322569896380884, 69.2823854765733})
+            .with_stroke_color("#3b982f")
+            .with_stroke_width(5)
+            .with_stroke_opacity(0.5));
 
-    const std::vector<int> res2{m[0].data_ | reverse | to<std::vector>()};
+    geo_json.add_element(
+        GeoJson::Circle{}
+            .with_size(1.0)
+            .with_coordinate_latlon({41.32258544462388, 69.28202661985105})
+            .with_stroke_color("#910000")
+            .with_stroke_opacity(0.8)
+            .with_fill_color("#d66a6a")
+            .with_fill_opacity(0.3)
+            .with_stroke_width(1));
 
-    fmt::print("{}\n", fmt::join(res, ", "));
-    fmt::print("{}\n", fmt::join(res2, ", "));
+    geo_json.add_element(
+        GeoJson::Circle{}
+            .with_size(1.0)
+            .with_coordinate_latlon({41.322569896380884, 69.2823854765733})
+            .with_stroke_color("#910000")
+            .with_stroke_opacity(0.8)
+            .with_fill_color("#d66a6a")
+            .with_fill_opacity(0.3)
+            .with_stroke_width(1));
 
-    for (auto &&val : m) {
-      fmt::print("{}\n", fmt::join(val.second.data_, ", "));
-    }
+    geo_json.save("some_shit.geojson");
+
+    // rerun::RecordingStream rec{"test_match"};
+    // rec.connect_grpc("rerun+http://127.0.0.1:9877/proxy").exit_on_failure();
+
+    // rerun::GeoLineStrings{rerun::components::GeoLineString::from_lat_lon({})}
+    //     .with_colors(rerun::Color{})
+    //     .with_radii(rerun::Radius::ui_points(2.0f));
   }
 
+#if 0
   try {
-#if 1
     {
       const auto start_time{std::chrono::system_clock::now()};
 
@@ -243,6 +283,7 @@ int main(int argc, const char **argv) {
                 << std::endl;
     }
 #endif
+#if 0
 
     const auto start_time{std::chrono::system_clock::now()};
 
@@ -403,7 +444,7 @@ int main(int argc, const char **argv) {
   } catch (const std::exception &ex) {
     // fmt::print("{}\n", ex.what());
   }
-
+#endif
 #if 0
   int zone{0};
   bool northp{false};

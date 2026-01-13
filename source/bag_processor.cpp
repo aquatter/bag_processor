@@ -122,6 +122,18 @@ void BagProcessor::calculate() {
 
   load_tracks();
 
+#if 0
+  {
+    Mp4ImageLoader image_loader{set_.bag_path_};
+
+    const auto &det{image_tracks_.at(0).dets_[0]};
+    cv::Mat_<cv::Vec3b> img = image_loader.load_image(det.image_id_);
+
+    cv::rectangle(img, det.box_, {0.0, 0.0, 255.0}, 2);
+    cv::imwrite("test_det.png", img);
+  }
+#endif
+
   LOG(INFO) << "Tracks loaded";
 
   collect_detections();
@@ -133,15 +145,15 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# valid tracks: " << select_valid_tracks();
   LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
 
-  TrackMerger merger{shared_from_this()};
-  merger.process();
-
-  extract_images();
   calculate_metrics();
 
   LOG(INFO) << "# combined landmarks: "
             << combine_landmarks(image_tracks_, local_converter_);
 
+  TrackMerger merger{shared_from_this()};
+  merger.process();
+
+  extract_images();
   calculate_metrics();
 }
 
@@ -426,15 +438,27 @@ void BagProcessor::load_measurements(const std::string_view path) {
     parser_set.save_bag_ = false;
     parser_set.save_geojson_ = false;
     parser_set.no_imu_ = true;
+    parser_set.gps_exclusion_intervals_ = set_.gps_exclusion_intervals_;
     parser_set.callback_ = [this, &camera](const GPMFChunkBase *chunk) {
       switch (chunk->whoami()) {
 
       case ChunkType::GPS: {
-        const auto &m{static_cast<const GPSChunk *>(chunk)->measurements_};
+        auto gps_chunk{static_cast<const GPSChunk *>(chunk)};
 
         gps_ = std::move(gps_) |
                ranges::actions::push_back(
-                   m | transform([](const GPSChunk::Measurement &val) {
+                   gps_chunk->measurements_ |
+                   filter([&gps_chunk](const GPSChunk::Measurement &val) {
+                     if (val.fix_ != 3.0) {
+                       return false;
+                     }
+
+                     if (gps_chunk->exclude(val.timestamp_)) {
+                       return false;
+                     }
+                     return true;
+                   }) |
+                   transform([](const GPSChunk::Measurement &val) {
                      return GpsMeasurement{.timestamp_ = val.timestamp_,
                                            .enu_ = Eigen::Vector2d::Zero(),
                                            .latlon_ = val.lla_.head<2>()};

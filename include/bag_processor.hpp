@@ -35,6 +35,7 @@ struct BagProcessorSettings {
   std::string compressed_image_topic_;
   std::string gps_topic_;
   bool gopro_mode_;
+  std::vector<std::pair<int64_t, int64_t>> gps_exclusion_intervals_;
 
   void print() const noexcept;
 

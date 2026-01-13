@@ -116,6 +116,10 @@ int main(const int argc, const char *const *argv) {
         ->required()
         ->check(CLI::ExistingDirectory);
 
+    app.add_option(
+        "--exclude-gps", set.gps_exclusion_intervals_,
+        "Intervals in seconds where GPS measurements should be excluded");
+
     CLI11_PARSE(app, argc, argv);
 
     set.use_klt_ = false;

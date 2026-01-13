@@ -7,6 +7,7 @@
 #include <opencv2/core/matx.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/transform.hpp>
 
@@ -14,6 +15,44 @@ using ranges::to;
 using ranges::views::transform;
 
 FeatureMatcher::FeatureMatcher() : detector_{cv::AKAZE::create()} {}
+
+bool FeatureMatcher::estimate_homography(cv::Mat_<cv::Vec3b> image1,
+                                         const CalibrationDesc &calib1,
+                                         const std::string_view tag1,
+                                         cv::Mat_<cv::Vec3b> image2,
+                                         const CalibrationDesc &calib2,
+                                         const std::string_view tag2) {
+
+  const std::string key1{fmt::format("{}_{}", tag1, tag2)};
+  const std::string key2{fmt::format("{}_{}", tag2, tag1)};
+
+  if (homographies_.contains(key1)) {
+    return not homographies_.at(key1).empty();
+  }
+
+  if (homographies_.contains(key2)) {
+    return not homographies_.at(key2).empty();
+  }
+
+  if (not descriptors_.contains(tag1.data())) {
+    descriptors_[tag1.data()] = extract_descriptors(image1);
+  }
+
+  if (not descriptors_.contains(tag2.data())) {
+    descriptors_[tag2.data()] = extract_descriptors(image2);
+  }
+
+  auto res{estimate_homography(descriptors_.at(tag1.data()), tag1, calib1,
+                               descriptors_.at(tag2.data()), tag2, calib2)};
+
+  cv::Mat_<cv::Vec3b> img_matches{};
+  cv::drawMatches(image1, descriptors_[tag1.data()].keypoints_, image2,
+                  descriptors_[tag2.data()].keypoints_, inlier_matches_,
+                  img_matches);
+
+  cv::imwrite("matches.png", img_matches);
+  return res;
+}
 
 bool FeatureMatcher::estimate_homography(std::span<const uint8_t> buf1,
                                          const CalibrationDesc &calib1,
@@ -130,6 +169,7 @@ bool FeatureMatcher::estimate_homography(const Descriptors &desc1,
       cv::findHomography(pointsA, pointsB, cv::RANSAC, 3.0, inlier_mask);
 
   homographies_[key1] = H;
+  inlier_matches_.clear();
 
   for (size_t i = 0; i < good_matches.size(); ++i) {
     if (inlier_mask[i] == 1) {
@@ -162,6 +202,17 @@ FeatureMatcher::warp_points(const std::vector<cv::Point2f> &points,
 bool FeatureMatcher::contains(const std::string_view tag) const {
   return homographies_.contains(tag.data()) and
          not homographies_.at(tag.data()).empty();
+}
+
+Descriptors
+FeatureMatcher::extract_descriptors(cv::Mat_<cv::Vec3b> image) const {
+  cv::Mat_<uint8_t> imgGray{};
+  cv::cvtColor(image, imgGray, cv::COLOR_BGR2GRAY);
+
+  Descriptors d{};
+  detector_->detectAndCompute(imgGray, cv::noArray(), d.keypoints_,
+                              d.descriptors_);
+  return d;
 }
 
 Descriptors

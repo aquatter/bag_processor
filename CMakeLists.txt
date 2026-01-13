@@ -24,6 +24,7 @@ find_package(OpenMP COMPONENTS CXX REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(Parquet REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat
@@ -171,6 +172,8 @@ set_target_properties(combine_bags PROPERTIES
 
 add_executable(test_matching
     test_match.cpp
+    source/cartesian_converter.cpp
+
 )
 
 
@@ -185,11 +188,13 @@ target_link_libraries(test_matching PRIVATE
     ${OpenCV_LIBS}
     fmt::fmt
     range-v3::range-v3 range-v3::meta range-v3::concepts
+    rerun_sdk
+    Eigen3::Eigen
     # yaml-cpp::yaml-cpp
     # ng-log::ng-log
     # OpenMP::OpenMP_CXX
     # gpmf-extractor
-    # ${GeographicLib_LIBRARIES}
+    ${GeographicLib_LIBRARIES}
 )
 
 target_include_directories(test_matching PRIVATE
