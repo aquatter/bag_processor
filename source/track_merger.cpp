@@ -1,5 +1,5 @@
-#include "types.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bag_processor.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <boost/math/constants/constants.hpp>
@@ -26,13 +26,17 @@
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/filter.hpp>
+#include <range/v3/view/iota.hpp>
 #include <range/v3/view/join.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <threads.hpp>
 #include <track_merger.hpp>
 #include <triangulation.hpp>
+#include <types.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -41,6 +45,7 @@
 using ranges::to;
 using ranges::views::enumerate;
 using ranges::views::filter;
+using ranges::views::ints;
 using ranges::views::join;
 using ranges::views::transform;
 using ranges::views::zip;
@@ -93,7 +98,6 @@ struct TrackMerger::impl {
   bool should_be_linked(const SearchResult &res) { return false; }
 
   void process() {
-
     std::vector<std::pair<size_t, size_t>> link_result{};
 
     std::unordered_set<std::pair<size_t, size_t>, decltype([](const auto &p) {
@@ -103,6 +107,8 @@ struct TrackMerger::impl {
                          return seed;
                        })>
         taken{};
+
+    std::vector<SearchResult> tracks_to_check{};
 
     for (auto &&[src_track_id, track] : bag_->image_tracks_) {
       if (not track.valid_) {
@@ -134,13 +140,19 @@ struct TrackMerger::impl {
                                  index_result.src_track_id_,
                                  index_result.dst_track_id_);
 
-        LOG(INFO) << "Checking box correspondences";
-        if (not check_boxes(index_result)) {
-          LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+        if (boxes_should_be_checked(index_result)) {
+          tracks_to_check.push_back(index_result);
           continue;
         }
 
-        LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green), "success");
+        // if (not check_boxes(index_result)) {
+        //   LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+        //   continue;
+        // }
+
+        // LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green),
+        // "success");
+
         LOG(INFO) << "Trying to triangulate";
         if (not try_triangulate(
                     {index_result.dst_track_id_, index_result.src_track_id_})
@@ -154,7 +166,7 @@ struct TrackMerger::impl {
         link_result.emplace_back(index_result.dst_track_id_,
                                  index_result.src_track_id_);
 
-        dump_search_result(index_result, "linked_tracks.geojson");
+        // dump_search_result(index_result, "linked_tracks.geojson");
 #if 0
         dump_image(
             index_result.dst_track_id_, index_result.det_indixes_[5].dst_ind_,
@@ -171,6 +183,77 @@ struct TrackMerger::impl {
         }
 #endif
       }
+    }
+    {
+      std::unordered_set<size_t> image_ids{};
+
+      for (auto &&search_res : tracks_to_check) {
+        for (auto &&[dst_det_ind, src_det_ind] : search_res.det_indixes_) {
+
+          image_ids.insert(bag_->image_tracks_.at(search_res.dst_track_id_)
+                               .dets_[dst_det_ind]
+                               .image_id_);
+          image_ids.insert(bag_->image_tracks_.at(search_res.src_track_id_)
+                               .dets_[src_det_ind]
+                               .image_id_);
+        }
+      }
+
+      auto images_to_load{image_ids | to<std::vector>()};
+      std::sort(images_to_load.begin(), images_to_load.end());
+
+      ProgressBar progress{images_to_load.size(), "loading images..."};
+      progress.draw();
+      image_loader_.set_progress([&progress]() { progress.advance(); });
+      progress.done();
+
+      auto images{image_loader_.extract(images_to_load)};
+
+      for (auto &&[id, img] : zip(images_to_load, images)) {
+        image_cache_[id] = std::move(img);
+      }
+
+      ProgressBar progress2{images_to_load.size(), "extracting descriptors..."};
+      progress2.draw();
+
+      RunInThreads{static_cast<int>(images_to_load.size())}(
+          [this, &progress2,
+           &images_to_load](const RunInThreads::Context &ctx) {
+            for (auto &&i : ints(ctx.beg_, ctx.end_)) {
+              matcher_.extract_descriptors(
+                  image_cache_.at(images_to_load[i]),
+                  fmt::format("image_{}", images_to_load[i]));
+              progress2.advance();
+            }
+          });
+
+      progress2.done();
+    }
+
+    for (auto &&[i, search_res] : tracks_to_check | enumerate) {
+      LOG(INFO) << fmt::format(
+          "Analyzing tracks {} -> {}, ({}/{})", search_res.src_track_id_,
+          search_res.dst_track_id_, i + 1, tracks_to_check.size());
+
+      if (not check_boxes(search_res)) {
+        LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+        continue;
+      }
+
+      LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green), "success");
+
+      LOG(INFO) << "Trying to triangulate";
+      if (not try_triangulate(
+                  {search_res.dst_track_id_, search_res.src_track_id_})
+                  .has_value()) {
+        LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+        continue;
+      }
+
+      LOG(INFO) << fmt::format(fmt::fg(fmt::color::yellow_green), "success");
+
+      link_result.emplace_back(search_res.dst_track_id_,
+                               search_res.src_track_id_);
     }
 
     combine_landmarks(link_result);
@@ -300,6 +383,37 @@ struct TrackMerger::impl {
 #endif
   }
 
+  bool boxes_should_be_checked(const SearchResult &res) {
+
+    const auto &dst_track{bag_->image_tracks_.at(res.dst_track_id_)};
+    const auto &src_track{bag_->image_tracks_.at(res.src_track_id_)};
+    const auto &dst_dets{dst_track.dets_};
+
+    size_t num_ambiguites{0};
+
+    for (const auto &[dst_det_ind, src_det_ind] : res.det_indixes_) {
+      const auto &this_timestamp_dets{
+          bag_->image_detections_.at(dst_dets[dst_det_ind].timestamp_).dets_};
+
+      size_t num_candidates{0};
+      for (auto &d : this_timestamp_dets) {
+
+        if (d->code_ == src_track.code_) {
+          ++num_candidates;
+        }
+      }
+
+      if (num_candidates > 1) {
+        ++num_ambiguites;
+      }
+    }
+
+    const auto ambiguites_ratio{static_cast<float>(num_ambiguites) /
+                                static_cast<float>(res.det_indixes_.size())};
+
+    return ambiguites_ratio > 0.2f;
+  }
+
   bool check_boxes(const SearchResult &res) {
 
     const auto &dst_track{bag_->image_tracks_.at(res.dst_track_id_)};
@@ -332,16 +446,101 @@ struct TrackMerger::impl {
     const auto ambiguites_ratio{static_cast<float>(num_ambiguites) /
                                 static_cast<float>(res.det_indixes_.size())};
 
-    size_t num_mismatches{0};
-    size_t num_checked{0};
+    std::atomic_size_t num_mismatches{0};
+    std::atomic_size_t num_checked{0};
 
     if (ambiguites_ratio > 0.2f) {
-      ProgressBar progress{
-          static_cast<size_t>(ranges::count_if(requires_cheking,
-                                               [](auto &&val) { return val; })),
-          "Processing..."};
+
+      std::vector<SearchResult::DetPair> pairs_to_check{};
+
+      for (auto &&[det_pair, required] :
+           zip(res.det_indixes_, requires_cheking)) {
+
+        if (not required) {
+          continue;
+        }
+
+        pairs_to_check.push_back(det_pair);
+      }
+
+      ProgressBar progress{pairs_to_check.size(),
+                           fmt::format("Processing ({} -> {})",
+                                       res.src_track_id_, res.dst_track_id_)};
       progress.draw();
 
+      RunInThreads{static_cast<int>(pairs_to_check.size())}(
+          [this, &pairs_to_check, &dst_track, &dst_dets, &src_track, &src_dets,
+           &progress, &num_mismatches,
+           &num_checked](const RunInThreads::Context &ctx) {
+            for (auto &&ind : ints(ctx.beg_, ctx.end_)) {
+
+              const size_t dst_det_ind{pairs_to_check[ind].dst_ind_};
+              const size_t src_det_ind{pairs_to_check[ind].src_ind_};
+              const auto dst_image_id{dst_dets[dst_det_ind].image_id_};
+              const auto src_image_id{src_dets[src_det_ind].image_id_};
+
+              const auto tag1{fmt::format("image_{}", dst_image_id)};
+              const auto tag2{fmt::format("image_{}", src_image_id)};
+
+              if (not image_cache_.contains(dst_image_id)) {
+                LOG(WARNING) << fmt::format("image {} not found", dst_image_id);
+                continue;
+              }
+
+              if (not image_cache_.contains(src_image_id)) {
+                LOG(WARNING) << fmt::format("image {} not found", src_image_id);
+                continue;
+              }
+
+              if (matcher_.estimate_homography(
+                      image_cache_.at(dst_image_id), bag_->calib_, tag1,
+                      image_cache_.at(src_image_id), bag_->calib_, tag2)) {
+
+                const auto &this_timestamp_dets{
+                    bag_->image_detections_.at(dst_dets[dst_det_ind].timestamp_)
+                        .dets_};
+
+                const auto src_center{
+                    cv::Vec2f{src_dets[src_det_ind].center_undistorted_}};
+
+                std::vector<cv::Point2f> dst_points{};
+                std::vector<size_t> track_ids;
+
+                for (auto &d : this_timestamp_dets) {
+                  if (d->code_ == src_track.code_) {
+                    dst_points.push_back(d->center_undistorted_);
+                    track_ids.push_back(d->track_id_);
+                  }
+                }
+
+                const auto projected_points{
+                    matcher_.warp_points(dst_points, tag1, tag2)};
+
+                size_t closest_track{0};
+                double min_dist{std::numeric_limits<double>::max()};
+
+                for (auto &&[p, id] : zip(projected_points, track_ids)) {
+                  const auto dist{cv::norm(cv::Vec2f{p}, src_center)};
+
+                  if (dist < min_dist) {
+                    min_dist = dist;
+                    closest_track = id;
+                  }
+                }
+
+                if (closest_track != dst_track.id_) {
+                  num_mismatches.fetch_add(1);
+                }
+
+                num_checked.fetch_add(1);
+              }
+
+              progress.advance();
+            }
+          });
+
+      progress.done();
+#if 0
       for (const auto &[dst_det_ind, src_det_ind] :
            res.det_indixes_ | enumerate |
                filter([&requires_cheking](auto &&val) {
@@ -359,11 +558,17 @@ struct TrackMerger::impl {
         const auto src_image_id{src_dets[src_det_ind].image_id_};
 
         if (not image_cache_.contains(dst_image_id)) {
-          image_cache_[dst_image_id] = image_loader_.load_image(dst_image_id);
+          throw std::runtime_error{
+              fmt::format("image {} not found", dst_image_id)};
+          // image_cache_[dst_image_id] =
+          // image_loader_.load_image(dst_image_id);
         }
 
         if (not image_cache_.contains(src_image_id)) {
-          image_cache_[src_image_id] = image_loader_.load_image(src_image_id);
+          throw std::runtime_error{
+              fmt::format("image {} not found", src_image_id)};
+          // image_cache_[src_image_id] =
+          // image_loader_.load_image(src_image_id);
         }
 
         if (matcher_.estimate_homography(
@@ -415,17 +620,21 @@ struct TrackMerger::impl {
         progress.advance();
       }
 
-      progress.done();
+#endif
+
     } else {
       return true;
     }
+
+    LOG(INFO) << fmt::format("num mistmatches: {}, num checked: {}",
+                             num_mismatches.load(), num_checked.load());
 
     if (num_checked == 0) {
       return false;
     }
 
-    const auto mismatches_ratio{static_cast<float>(num_mismatches) /
-                                static_cast<float>(num_checked)};
+    const auto mismatches_ratio{static_cast<float>(num_mismatches.load()) /
+                                static_cast<float>(num_checked.load())};
 
     return mismatches_ratio < 0.2f;
   }
@@ -523,7 +732,15 @@ struct TrackMerger::impl {
     const auto src_image_id{src_dets[src_det_ind].image_id_};
     const auto dst_image_id{dst_dets[dst_det_ind].image_id_};
 
-    cv::Mat_<cv::Vec3b> img = image_cache_.at(src_image_id).clone();
+    cv::Mat_<cv::Vec3b> img{};
+
+    {
+      const auto &buf{image_cache_.at(src_image_id)};
+      cv::Mat_<uint8_t> gray_img = cv::imdecode(
+          {buf.data(), static_cast<int>(buf.size())}, cv::IMREAD_GRAYSCALE);
+
+      cv::cvtColor(gray_img, img, cv::COLOR_GRAY2BGR);
+    }
 
     for (auto &&d :
          bag_->image_detections_.at(src_dets[src_det_ind].timestamp_).dets_) {
@@ -541,7 +758,13 @@ struct TrackMerger::impl {
 
     cv::imwrite("src_img.png", img);
 
-    img = image_cache_.at(dst_image_id).clone();
+    {
+      const auto &buf{image_cache_.at(dst_image_id)};
+      cv::Mat_<uint8_t> gray_img = cv::imdecode(
+          {buf.data(), static_cast<int>(buf.size())}, cv::IMREAD_GRAYSCALE);
+
+      cv::cvtColor(gray_img, img, cv::COLOR_GRAY2BGR);
+    }
 
     for (auto &&d :
          bag_->image_detections_.at(dst_dets[dst_det_ind].timestamp_).dets_) {
@@ -798,7 +1021,7 @@ struct TrackMerger::impl {
 
   FeatureMatcher matcher_;
   Mp4ImageLoader image_loader_;
-  std::unordered_map<size_t, cv::Mat_<cv::Vec3b>> image_cache_;
+  std::unordered_map<size_t, std::vector<uint8_t>> image_cache_;
 };
 
 TrackMerger::TrackMerger(std::shared_ptr<BagProcessor> bag)

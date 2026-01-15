@@ -21,6 +21,7 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <fstream>
+#include <geo_json.hpp>
 #include <gpmf_frame.hpp>
 #include <gpmf_parser.hpp>
 #include <gtsam/base/Matrix.h>
@@ -40,7 +41,6 @@
 #include <limits>
 #include <memory>
 #include <mp4_image_loader.hpp>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <numbers>
@@ -150,11 +150,19 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# combined landmarks: "
             << combine_landmarks(image_tracks_, local_converter_);
 
-  TrackMerger merger{shared_from_this()};
-  merger.process();
+  save_geojson("before_");
+
+  {
+    LOG(INFO) << "Merging tracks...";
+    TrackMerger merger{shared_from_this()};
+    merger.process();
+  }
+
+  save_geojson("after_");
 
   extract_images();
   calculate_metrics();
+  report();
 }
 
 void BagProcessor::calculate_metrics(
@@ -495,7 +503,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
     for (auto &&gps : gps_) {
       gps.enu_ = local_converter_.enu(gps.latlon_);
 
-      if ((gps.enu_ - prev_enu).norm() > 2.0) {
+      if ((gps.enu_ - prev_enu).squaredNorm() > 4.0) {
         prev_enu = gps.enu_;
         stable_gps_.emplace_back(gps.timestamp_, gps.enu_, gps.latlon_);
       }
@@ -518,7 +526,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
         serialization_image.deserialize_message(&serialized_msg, &image_msg);
 
         const auto timestamp{
-            static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000 +
+            static_cast<int64_t>(image_msg.header.stamp.sec) * 1'000'000'000l +
             static_cast<int64_t>(image_msg.header.stamp.nanosec)};
 
         camera.emplace_back(CameraMeasurement{
@@ -529,7 +537,7 @@ void BagProcessor::load_measurements(const std::string_view path) {
         serialization_gps.deserialize_message(&serialized_msg, &gps_msg);
 
         const auto timestamp{
-            static_cast<int64_t>(gps_msg.header.stamp.sec) * 1'000'000'000 +
+            static_cast<int64_t>(gps_msg.header.stamp.sec) * 1'000'000'000l +
             static_cast<int64_t>(gps_msg.header.stamp.nanosec)};
 
         if (not local_converter_.origin_set()) {
@@ -568,13 +576,17 @@ void BagProcessor::load_measurements(const std::string_view path) {
 
       if (ind > 0) {
 
-        const auto t{static_cast<double>(cam.timestamp_ -
-                                         stable_gps_[ind - 1].timestamp_) /
-                     static_cast<double>(stable_gps_[ind].timestamp_ -
-                                         stable_gps_[ind - 1].timestamp_)};
+        const auto &gps0{stable_gps_[ind - 1]};
+        const auto &gps1{stable_gps_[ind]};
 
-        const Eigen::Vector2d enu{stable_gps_[ind - 1].enu_ * (1.0 - t) +
-                                  stable_gps_[ind].enu_ * t};
+        if ((gps1.enu_ - gps0.enu_).squaredNorm() > 25.0) {
+          continue;
+        }
+
+        const auto t{static_cast<double>(cam.timestamp_ - gps0.timestamp_) /
+                     static_cast<double>(gps1.timestamp_ - gps0.timestamp_)};
+
+        const Eigen::Vector2d enu{gps0.enu_ * (1.0 - t) + gps1.enu_ * t};
 
         camera_.emplace_back(i, cam.timestamp_, enu);
       }
@@ -1839,13 +1851,8 @@ void BagProcessor::extract_images() {
   // auto detector{cv::AKAZE::create()};
 
 #if 1
-  std::vector<ProgressBar::ProgressInfo> topics{
-      ProgressBar::ProgressInfo{.message_count_ = frames_to_extract.size(),
-                                .processed_count_ = 0,
-                                .topic_name_ = "frames: ",
-                                .ind_ = 0}};
 
-  ProgressBar progress{topics};
+  ProgressBar progress{frames_to_extract.size(), "loading frames..."};
   progress.draw();
 #endif
 
@@ -1933,7 +1940,7 @@ void BagProcessor::extract_images() {
   }
 
   std::sort(image_ids.begin(), image_ids.end());
-  image_loader->set_progress([&progress]() { progress.advance("frames: "); });
+  image_loader->set_progress([&progress]() { progress.advance(); });
 
   const auto bufs{image_loader->extract(image_ids)};
 
@@ -2016,5 +2023,76 @@ void BagProcessorSettings::print() const noexcept {
   } else {
     LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "GoPro mode: ")
               << fmt::format(fmt::fg(fmt::color::orange_red), "True");
+  }
+
+  if (not gps_exclusion_intervals_.empty()) {
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                             "GPS exclusion intervals:");
+    for (auto &&[start, end] : gps_exclusion_intervals_) {
+      LOG(INFO) << fmt::format(fmt::fg(fmt::color::orange_red), "({}, {})",
+                               start, end);
+    }
+  }
+}
+
+void BagProcessor::save_geojson(const std::string_view prefix) const {
+  GeoJson geo_json{set_.session_name_};
+
+  for (auto &&[track_id, track] : image_tracks_) {
+
+    if (not track.valid_) {
+      continue;
+    }
+
+    geo_json.add_element(GeoJson::Point{}
+                             .with_marker_size(GeoJson::Point::Small)
+                             .with_coordinate_latlon(track.landmark_->latlon_)
+                             .with_sign_id(track.code_)
+                             .with_marker_color("#1437d3"));
+  }
+
+  const auto coords{stable_gps_ | transform([](const GpsMeasurement &p) {
+                      return p.latlon_;
+                    }) |
+                    to<std::vector>()};
+
+  geo_json.add_element(GeoJson::LineString{}
+                           .with_description("GPS Track")
+                           .with_coordinates_latlon(coords)
+                           .with_stroke_width(2)
+                           .with_stroke_opacity(0.5)
+                           .with_stroke_color("#1bdd2b"));
+
+  geo_json.save(fmt::format("{}{}/{}.geojson", prefix.data(), set_.bag_path_,
+                            set_.session_name_));
+}
+
+void BagProcessor::report() {
+  std::unordered_map<std::string, size_t> m{};
+  size_t total_triangulated{0};
+
+  for (auto &&[track_id, track] : image_tracks_) {
+    if (not track.valid_) {
+      continue;
+    }
+
+    if (not m.contains(track.code_)) {
+      m[track.code_] = 1;
+      continue;
+    }
+
+    ++m[track.code_];
+    ++total_triangulated;
+  }
+
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "Report:");
+  LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow),
+                           "Reconstructed landmarks: ")
+            << fmt::format(fmt::fg(fmt::color::orange_red), "{}",
+                           total_triangulated);
+
+  for (auto &&[code, count] : m) {
+    LOG(INFO) << fmt::format(fmt::fg(fmt::color::green_yellow), "{}: ", code)
+              << fmt::format(fmt::fg(fmt::color::orange_red), "{}", count);
   }
 }

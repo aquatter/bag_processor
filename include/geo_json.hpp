@@ -40,6 +40,11 @@ public:
       return static_cast<Derived &>(*this);
     }
 
+    Derived &with_description(const std::string_view str) {
+      element_["properties"]["description"] = str.data();
+      return static_cast<Derived &>(*this);
+    }
+
     nlohmann::json element_{};
   };
 
@@ -155,7 +160,7 @@ public:
       element_["geometry"]["type"] = "Point";
     }
 
-    Point &with_color(const std::string_view color) {
+    Point &with_marker_color(const std::string_view color) {
       element_["properties"]["marker-color"] = color.data();
       return *this;
     }
@@ -176,7 +181,7 @@ public:
       return *this;
     }
 
-    Point &with_size(MarkerSize size) {
+    Point &with_marker_size(MarkerSize size) {
       switch (size) {
       case Small:
         element_["properties"]["marker-size"] = "small";
@@ -190,9 +195,17 @@ public:
       }
       return *this;
     }
+
+    Point &with_sign_id(const std::string_view str) {
+      element_["properties"]["sign_id"] = str.data();
+      return *this;
+    }
   };
 
-  GeoJson() { root_["type"] = "FeatureCollection"; }
+  GeoJson(const std::string_view name = "Some Shitty GeoJson") {
+    root_["type"] = "FeatureCollection";
+    root_["name"] = name.data();
+  }
 
   template <typename T> void add_element(const T &element) {
     root_["features"].push_back(element.element_);

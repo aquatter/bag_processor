@@ -52,6 +52,7 @@ struct BagProcessorSettings {
     ar & compressed_image_topic_;
     ar & gps_topic_;
     ar & gopro_mode_;
+    ar & gps_exclusion_intervals_;
   }
 };
 
@@ -131,6 +132,8 @@ private:
   size_t select_valid_tracks();
 
   void extract_images();
+  void save_geojson(const std::string_view prefix = "") const;
+  void report();
 
   BagProcessorSettings set_;
   std::shared_ptr<rerun::RecordingStream> rec_;

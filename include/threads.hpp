@@ -19,7 +19,7 @@ struct RunInThreads {
   };
 
   template <std::invocable<const Context &> F> void operator()(F &&fun) {
-    std::vector<std::jthread> threads;
+    std::vector<std::thread> threads;
 
     for (auto &&i : std::views::iota(0, num_threads_)) {
       const int beg{i * chunk_size_};
@@ -29,6 +29,12 @@ struct RunInThreads {
         threads.emplace_back([body = fun, beg, end, i, this]() {
           body(Context{beg, end, i, [this]() { return get_progress(); }});
         });
+      }
+    }
+
+    for (auto &&wt : threads) {
+      if (wt.joinable()) {
+        wt.join();
       }
     }
   }
