@@ -1,8 +1,10 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/src/Core/Matrix.h>
 #include <boost/math/constants/constants.hpp>
 #include <cartesian_converter.hpp>
+#include <cstddef>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <range/v3/view/linear_distribute.hpp>
@@ -63,9 +65,9 @@ public:
     }
   };
 
-  template <typename Derived> struct Polygon : public BaseElement<Derived> {
+  template <typename Derived> struct PolygonBase : public BaseElement<Derived> {
     using base = BaseElement<Derived>;
-    Polygon() {
+    PolygonBase() {
       base::element_["geometry"]["type"] = "Polygon";
       base::element_["properties"]["fill"] = "#299100";
       base::element_["properties"]["fill-opacity"] = 0.5;
@@ -78,6 +80,18 @@ public:
 
     Derived &with_fill_opacity(double opacity) {
       base::element_["properties"]["fill-opacity"] = opacity;
+      return static_cast<Derived &>(*this);
+    }
+
+    Derived &with_coordinates_latlon(std::span<const Eigen::Vector2d> coords) {
+      std::vector<std::vector<double>> d{};
+      d.reserve(coords.size());
+
+      for (auto &&p : coords) {
+        d.push_back({p.y(), p.x()});
+      }
+
+      base::element_["geometry"]["coordinates"].push_back(d);
       return static_cast<Derived &>(*this);
     }
   };
@@ -95,7 +109,7 @@ public:
     }
   };
 
-  struct Square : public Polygon<Square> {
+  struct Square : public PolygonBase<Square> {
     Square &with_size(double size) {
       marker_size_ = size;
       return *this;
@@ -103,28 +117,21 @@ public:
 
     Square &with_coordinate_latlon(const Eigen::Vector2d &p) {
       const CartesianConverter converter{p};
-      std::vector<std::vector<double>> d{};
+      std::array<Eigen::Vector2d, 5> coords{};
 
-      auto latlon{converter.latlon({-marker_size_, -marker_size_})};
-      d.push_back({latlon.y(), latlon.x()});
-      latlon = converter.latlon({marker_size_, -marker_size_});
-      d.push_back({latlon.y(), latlon.x()});
-      latlon = converter.latlon({marker_size_, marker_size_});
-      d.push_back({latlon.y(), latlon.x()});
-      latlon = converter.latlon({-marker_size_, marker_size_});
-      d.push_back({latlon.y(), latlon.x()});
-      latlon = converter.latlon({-marker_size_, -marker_size_});
-      d.push_back({latlon.y(), latlon.x()});
+      coords[0] = converter.latlon({-marker_size_, -marker_size_});
+      coords[1] = converter.latlon({marker_size_, -marker_size_});
+      coords[2] = converter.latlon({marker_size_, marker_size_});
+      coords[3] = converter.latlon({-marker_size_, marker_size_});
+      coords[4] = coords[0];
 
-      element_["geometry"]["coordinates"].push_back(d);
-
-      return *this;
+      return with_coordinates_latlon(coords);
     }
 
     double marker_size_{0.1};
   };
 
-  struct Circle : public Polygon<Circle> {
+  struct Circle : public PolygonBase<Circle> {
 
     Circle &with_size(double size) {
       marker_size_ = size;
@@ -132,24 +139,29 @@ public:
     }
 
     Circle &with_coordinate_latlon(const Eigen::Vector2d &p) {
+      static constexpr std::ptrdiff_t num_points{30};
+
       const CartesianConverter converter{p};
+      std::array<Eigen::Vector2d, num_points> coords{};
       std::vector<std::vector<double>> d{};
 
-      for (auto &&angle : ranges::views::linear_distribute(
-               0.0, boost::math::double_constants::two_pi, 30)) {
+      for (int i{0};
+           auto &&angle : ranges::views::linear_distribute(
+               0.0, boost::math::double_constants::two_pi, num_points)) {
 
-        const auto latlon{converter.latlon(
-            {marker_size_ * std::cos(angle), marker_size_ * std::sin(angle)})};
+        coords[i] = converter.latlon(
+            {marker_size_ * std::cos(angle), marker_size_ * std::sin(angle)});
 
-        d.push_back({latlon.y(), latlon.x()});
+        ++i;
       }
 
-      element_["geometry"]["coordinates"].push_back(d);
-      return *this;
+      return with_coordinates_latlon(coords);
     }
 
     double marker_size_{0.1};
   };
+
+  struct Polygon : public PolygonBase<Polygon> {};
 
   struct Point : public BaseElement<Point> {
     enum MarkerSize { Small, Medium, Large };

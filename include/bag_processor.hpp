@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Eigen/Geometry>
-#include <Eigen/src/Core/Matrix.h>
 #include <boost/math/constants/constants.hpp>
 #include <cartesian_converter.hpp>
 #include <cstddef>

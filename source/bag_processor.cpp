@@ -2063,7 +2063,7 @@ void BagProcessor::save_geojson(const std::string_view prefix) const {
                            .with_stroke_opacity(0.5)
                            .with_stroke_color("#1bdd2b"));
 
-  geo_json.save(fmt::format("{}{}/{}.geojson", prefix.data(), set_.bag_path_,
+  geo_json.save(fmt::format("{}/{}{}.geojson", set_.bag_path_, prefix.data(),
                             set_.session_name_));
 }
 

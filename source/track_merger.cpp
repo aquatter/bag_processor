@@ -95,8 +95,6 @@ struct TrackMerger::impl {
     indexer_.buildIndex(dataset);
   }
 
-  bool should_be_linked(const SearchResult &res) { return false; }
-
   void process() {
     std::vector<std::pair<size_t, size_t>> link_result{};
 
@@ -256,6 +254,7 @@ struct TrackMerger::impl {
                                search_res.src_track_id_);
     }
 
+    LOG(INFO) << "Combining landmarks";
     combine_landmarks(link_result);
   }
 
@@ -516,7 +515,7 @@ struct TrackMerger::impl {
                 const auto projected_points{
                     matcher_.warp_points(dst_points, tag1, tag2)};
 
-                size_t closest_track{0};
+                size_t closest_track_id{0};
                 double min_dist{std::numeric_limits<double>::max()};
 
                 for (auto &&[p, id] : zip(projected_points, track_ids)) {
@@ -524,11 +523,11 @@ struct TrackMerger::impl {
 
                   if (dist < min_dist) {
                     min_dist = dist;
-                    closest_track = id;
+                    closest_track_id = id;
                   }
                 }
 
-                if (closest_track != dst_track.id_) {
+                if (closest_track_id != dst_track.id_) {
                   num_mismatches.fetch_add(1);
                 }
 
