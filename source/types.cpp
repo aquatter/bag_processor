@@ -202,6 +202,7 @@ TrackPoint ImageTrack::track_point(size_t i) const {
                     .center_undistorted_ = dets_[i].center_undistorted_,
                     .pose_ = dets_[i].cam_to_world_.value(),
                     .angle_ = dets_[i].angle_,
+                    .direction_ = dets_[i].direction_.value(),
                     .calib_ = calib_};
 }
 

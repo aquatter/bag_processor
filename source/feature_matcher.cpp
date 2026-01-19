@@ -114,8 +114,8 @@ bool FeatureMatcher::estimate_homography(std::span<const uint8_t> buf1,
       // descriptors_[tag2.data()] = extract_descriptors_impl(buf2);
     }
 
-    desc1 = descriptors_[tag1.data()];
-    desc2 = descriptors_[tag2.data()];
+    desc1 = descriptors_.at(tag1.data());
+    desc2 = descriptors_.at(tag2.data());
   }
 
   const auto H{

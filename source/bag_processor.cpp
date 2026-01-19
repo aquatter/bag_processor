@@ -1,4 +1,5 @@
 #include <Eigen/Geometry>
+#include <Eigen/src/Geometry/Translation.h>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
 #include <array>
@@ -119,20 +120,7 @@ void BagProcessor::calculate() {
   calib_.print();
 
   load_ground_truth_landmarks(set_.ground_truth_path_);
-
   load_tracks();
-
-#if 0
-  {
-    Mp4ImageLoader image_loader{set_.bag_path_};
-
-    const auto &det{image_tracks_.at(0).dets_[0]};
-    cv::Mat_<cv::Vec3b> img = image_loader.load_image(det.image_id_);
-
-    cv::rectangle(img, det.box_, {0.0, 0.0, 255.0}, 2);
-    cv::imwrite("test_det.png", img);
-  }
-#endif
 
   LOG(INFO) << "Tracks loaded";
 
@@ -145,7 +133,20 @@ void BagProcessor::calculate() {
   LOG(INFO) << "# valid tracks: " << select_valid_tracks();
   LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
 
+  {
+    const auto best_angle{optimize_angle(-7.0, 7.0, 15)};
+
+    if (set_.correction_angle_ != best_angle) {
+      LOG(INFO) << "changing angle and recalculating landmarks";
+
+      set_.correction_angle_ = best_angle;
+      change_angle();
+      LOG(INFO) << "# triangulated landmarks: " << triangulate_tracks();
+    }
+  }
+
   calculate_metrics();
+  report();
 
   LOG(INFO) << "# combined landmarks: "
             << combine_landmarks(image_tracks_, local_converter_);
@@ -181,33 +182,58 @@ void BagProcessor::calculate_metrics(
   }
 }
 
-void BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
+double BagProcessor::optimize_angle(double from, double to, ptrdiff_t num) {
 
-  float max_auc{0.0f};
-  Metrics::Result best_result{};
-  float best_angle{0.0f};
-  std::vector<Landmark> best_landmarks{};
+  LOG(INFO) << "Angle optimization started";
 
-  const Metrics metrics{Metrics::Settings{}, gps_,
-                        load_ground_truth_landmarks(set_.ground_truth_path_)};
+  size_t best_cnt{0};
+  double best_angle{0.0f};
+
+  const auto valid_track_ids{
+      image_tracks_ | filter([](auto &&val) { return val.second.valid_; }) |
+      transform([](auto &&val) { return val.first; }) | ::to<std::vector>()};
 
   for (auto &&angle : linear_distribute(from, to, num)) {
-    change_angle(angle);
 
-    triangulate_tracks();
-    combine_landmarks(image_tracks_, local_converter_);
+    ProgressBar progress{valid_track_ids.size(),
+                         fmt::format("angle: {:.1}", angle)};
+    progress.draw();
 
-    auto res{metrics.eval(image_tracks_)};
+    std::atomic_size_t cnt{0};
 
-    if (max_auc < res.precision_auc_) {
-      max_auc = res.precision_auc_;
-      best_result = std::move(res);
-      best_angle = angle;
+    RunInThreads{static_cast<int>(valid_track_ids.size())}(
+        [this, &valid_track_ids, &angle, &progress,
+         &cnt](const RunInThreads::Context &ctx) {
+          for (auto &&i : ints(ctx.beg_, ctx.end_)) {
+            auto points{
+                image_tracks_.at(valid_track_ids[i]).selected_track_points()};
+
+            change_angle(angle, points);
+            const auto landmark{triangulate_on_boxes(points)};
+
+            if (landmark.has_value()) {
+              cnt.fetch_add(1);
+            }
+
+            progress.advance();
+          }
+        });
+
+    progress.done();
+
+    LOG(INFO) << fmt::format("triangulated: {}", cnt.load());
+
+    if (cnt != 0) {
+
+      if (best_cnt < cnt.load()) {
+        best_cnt = cnt.load();
+        best_angle = angle;
+      }
     }
   }
 
   LOG(INFO) << "Best angle: " << best_angle;
-  LOG(INFO) << "Best auc: " << max_auc;
+  return best_angle;
 }
 
 void BagProcessor::collect_detections() {
@@ -1740,26 +1766,42 @@ void BagProcessor::track_features() {
 }
 #endif
 
-void BagProcessor::change_angle(double angle_deg) {
-  for (auto &&[track_id, track] : image_tracks_) {
+void BagProcessor::change_angle(double angle_deg,
+                                std::span<TrackPoint> track_points) {
 
+  for (auto &&point : track_points) {
+    point.pose_ = Eigen::Isometry3d{
+        Eigen::Translation3d{point.pose_.translation()} *
+        Eigen::AngleAxisd{angle_deg * boost::math::double_constants::degree,
+                          Eigen::Vector3d::UnitZ()} *
+        Eigen::AngleAxisd{
+            -std::atan2(point.direction_.x(), point.direction_.y()),
+            Eigen::Vector3d::UnitZ()} *
+        Eigen::AngleAxisd{-boost::math::double_constants::half_pi,
+                          Eigen::Vector3d::UnitX()}};
+  }
+}
+
+void BagProcessor::change_angle() {
+
+  for (auto &&[track_id, track] : image_tracks_) {
     if (not track.valid_) {
       continue;
     }
 
-    for (auto &&d : track.dets_) {
-
-      if (not d.direction_.has_value()) {
+    for (auto &&det : track.dets_) {
+      if (not det.cam_to_world_.has_value()) {
         continue;
       }
 
-      d.cam_to_world_ = Eigen::Isometry3d{
-          Eigen::Translation3d{d.enu_.value().x(), d.enu_.value().y(), 0.0f} *
-          Eigen::AngleAxisd{angle_deg * boost::math::double_constants::degree,
+      det.cam_to_world_ = Eigen::Isometry3d{
+          Eigen::Translation3d{det.cam_to_world_.value().translation()} *
+          Eigen::AngleAxisd{set_.correction_angle_ *
+                                boost::math::double_constants::degree,
                             Eigen::Vector3d::UnitZ()} *
-          Eigen::AngleAxisd{
-              -std::atan2(d.direction_.value().x(), d.direction_.value().y()),
-              Eigen::Vector3d::UnitZ()} *
+          Eigen::AngleAxisd{-std::atan2(det.direction_.value().x(),
+                                        det.direction_.value().y()),
+                            Eigen::Vector3d::UnitZ()} *
           Eigen::AngleAxisd{-boost::math::double_constants::half_pi,
                             Eigen::Vector3d::UnitX()}};
     }
@@ -2035,7 +2077,8 @@ void BagProcessorSettings::print() const noexcept {
   }
 }
 
-void BagProcessor::save_geojson(const std::string_view prefix) const {
+void BagProcessor::save_geojson(const std::string_view prefix,
+                                bool save_track) const {
   GeoJson geo_json{set_.session_name_};
 
   for (auto &&[track_id, track] : image_tracks_) {
@@ -2048,7 +2091,13 @@ void BagProcessor::save_geojson(const std::string_view prefix) const {
                              .with_marker_size(GeoJson::Point::Small)
                              .with_coordinate_latlon(track.landmark_->latlon_)
                              .with_sign_id(track.code_)
-                             .with_marker_color("#1437d3"));
+                             .with_marker_color("#1437d3")
+                             .with_property("track_id", track.id_)
+                             .with_property("session", set_.session_name_));
+  }
+
+  if (not save_track) {
+    return;
   }
 
   const auto coords{stable_gps_ | transform([](const GpsMeasurement &p) {

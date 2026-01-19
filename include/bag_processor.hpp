@@ -70,7 +70,7 @@ public:
   void
   calculate_metrics(std::optional<std::filesystem::path> path = std::nullopt);
 
-  void optimize_angle(double from, double to, ptrdiff_t num);
+  double optimize_angle(double from, double to, ptrdiff_t num);
 
   BagProcessor &log_gps_path();
   BagProcessor &log_gps_path_map();
@@ -126,12 +126,14 @@ private:
   void triangulate(ImageTrack &track) const;
   void collect_detections();
   void track_features();
-  void change_angle(double angle_deg);
+  void change_angle(double angle_deg, std::span<TrackPoint> track_points);
+  void change_angle();
 
   size_t select_valid_tracks();
 
   void extract_images();
-  void save_geojson(const std::string_view prefix = "") const;
+  void save_geojson(const std::string_view prefix = "",
+                    bool save_track = false) const;
   void report();
 
   BagProcessorSettings set_;

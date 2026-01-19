@@ -120,6 +120,7 @@ struct TrackPoint {
   cv::Point2f center_undistorted_;
   Eigen::Isometry3d pose_;
   float angle_;
+  Eigen::Vector2d direction_;
   CalibrationDesc calib_;
 
   operator gtsam::PinholeCamera<gtsam::Cal3_S2>() const {
