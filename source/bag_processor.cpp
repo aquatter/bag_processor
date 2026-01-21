@@ -1,5 +1,4 @@
 #include <Eigen/Geometry>
-#include <Eigen/src/Geometry/Translation.h>
 #include <GeographicLib/LocalCartesian.hpp>
 #include <algorithm>
 #include <array>
@@ -40,6 +39,7 @@
 #include <interpolation.h>
 #include <iterator>
 #include <limits>
+#include <load_parquet.hpp>
 #include <memory>
 #include <mp4_image_loader.hpp>
 #include <nlohmann/json.hpp>
@@ -47,6 +47,7 @@
 #include <numbers>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/core/matx.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -68,6 +69,8 @@
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+
+#if USE_RERUN
 #include <rerun.hpp>
 #include <rerun/archetypes/geo_line_strings.hpp>
 #include <rerun/archetypes/geo_points.hpp>
@@ -76,6 +79,7 @@
 #include <rerun/components/geo_line_string.hpp>
 #include <rerun/components/image_plane_distance.hpp>
 #include <rerun_logging.hpp>
+#endif
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
@@ -120,7 +124,15 @@ void BagProcessor::calculate() {
   calib_.print();
 
   load_ground_truth_landmarks(set_.ground_truth_path_);
-  load_tracks();
+
+  if (std::filesystem::path{set_.annotations_path_}.extension() == ".json") {
+    load_tracks();
+  } else if (std::filesystem::path{set_.annotations_path_}.extension() ==
+             ".parquet") {
+    load_tracks_from_parquet();
+  } else {
+    throw std::runtime_error{"unknown file format with annotations"};
+  }
 
   LOG(INFO) << "Tracks loaded";
 
@@ -346,6 +358,54 @@ void BagProcessor::load_detections(const std::string_view path) {
       [](const auto &a, const auto &b) { return a.timestamp_ < b.timestamp_; });
 
 #endif
+}
+
+void BagProcessor::load_tracks_from_parquet() {
+
+  std::unordered_map<size_t, size_t> image_id_to_ind{};
+
+  for (auto &&[i, cam] : enumerate(camera_)) {
+    image_id_to_ind[cam.image_id_] = i;
+  }
+
+  auto dets{load_detections_from_parquet(set_.annotations_path_)};
+  std::unordered_set<size_t> processed_tracks{};
+
+  for (auto &&d : dets) {
+
+    if (not image_id_to_ind.contains(d.image_id_)) {
+      continue;
+    }
+
+    if (not processed_tracks.contains(d.track_id_)) {
+      ImageTrack track{};
+      track.name_ = set_.session_name_;
+      track.id_ = d.track_id_;
+      track.code_ = d.code_;
+      track.length_ = 0.0;
+      track.calib_ = calib_;
+      track.geodetic_origin_ = local_converter_.origin();
+      image_tracks_[d.track_id_] = track;
+    }
+
+    d.timestamp_ = camera_[image_id_to_ind.at(d.image_id_)].timestamp_;
+    d.center_undistorted_ = calib_.undistort_point(d.center_);
+    d.enu_ = camera_[image_id_to_ind.at(d.image_id_)].enu_;
+    d.gps_ind_ =
+        std::distance(&camera_[0], &camera_[image_id_to_ind.at(d.image_id_)]);
+
+    image_tracks_.at(d.track_id_).dets_.push_back(d);
+  }
+
+  for (auto &&[track_id, track] : image_tracks_) {
+    std::sort(
+        track.dets_.begin(), track.dets_.end(),
+        [](const auto &a, const auto &b) { return a.image_id_ < b.image_id_; });
+
+    for (auto &&d : track.dets_) {
+      track.stamp_to_detection_[d.timestamp_] = &d;
+    }
+  }
 }
 
 void BagProcessor::load_tracks() {
@@ -825,6 +885,7 @@ BagProcessor::estimate_camera_pos(int64_t timestamp) const {
 
 BagProcessor &
 BagProcessor::log_ground_truth_landmarks(const std::string_view landmark_code) {
+#if USE_RERUN
   if (rec_) {
     const auto ground_truth_landmarks{
         load_ground_truth_landmarks(set_.ground_truth_path_)};
@@ -835,11 +896,12 @@ BagProcessor::log_ground_truth_landmarks(const std::string_view landmark_code) {
       }
     }
   }
-
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_ground_truth_landmarks() {
+#if USE_RERUN
   if (rec_) {
 
     std::unordered_map<std::string, rerun::Color> color_map{};
@@ -868,13 +930,14 @@ BagProcessor &BagProcessor::log_ground_truth_landmarks() {
     rec_->log("map/gt", rerun::GeoPoints{coords}.with_colors(colors).with_radii(
                             rerun::Radius::ui_points(5.0f)));
   }
+#endif
 
   return *this;
 }
 
 BagProcessor &
 BagProcessor::log_landmarks_map(std::span<const Landmark> landmarks) {
-
+#if USE_RERUN
   if (rec_) {
     std::unordered_map<std::string, rerun::Color> color_map{};
     std::mt19937 gen{};
@@ -889,10 +952,12 @@ BagProcessor::log_landmarks_map(std::span<const Landmark> landmarks) {
       log_landmark_map(l, color_map[l.code_]);
     }
   }
+#endif
 
   return *this;
 }
 
+#if USE_RERUN
 BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
                                              rerun::Color color) {
   if (rec_) {
@@ -934,8 +999,12 @@ BagProcessor &BagProcessor::log_landmark_map(Landmark landmark,
 
   return *this;
 }
+#endif
 
 BagProcessor &BagProcessor::log_gps_path_map() {
+
+#if USE_RERUN
+
   if (rec_) {
 
     const std::vector<rerun::DVec2D> gps_path{
@@ -951,10 +1020,13 @@ BagProcessor &BagProcessor::log_gps_path_map() {
                   .with_colors(rerun::Color{0, 255, 0})
                   .with_radii(rerun::Radius::ui_points(2.0f)));
   }
+
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_gps_path() {
+#if USE_RERUN
   if (rec_) {
 
     const std::vector<rerun::Vec3D> gps_path{
@@ -968,10 +1040,12 @@ BagProcessor &BagProcessor::log_gps_path() {
               rerun::LineStrips3D{rerun::LineStrip3D{gps_path}}.with_colors(
                   rerun::Color{0, 255, 0}));
   }
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_axis() {
+#if USE_RERUN
   if (rec_) {
 
     rec_->log("world/X",
@@ -995,12 +1069,12 @@ BagProcessor &BagProcessor::log_axis() {
                   .with_colors(rerun::Color{0, 0, 255})
                   .with_radii(rerun::Radius::ui_points(10.0f)));
   }
-
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_camera(int64_t timestamp) {
-
+#if USE_RERUN
   if (rec_) {
 
     const cv::Mat_<cv::Vec3b> img = load_image(timestamp);
@@ -1038,12 +1112,12 @@ BagProcessor &BagProcessor::log_camera(int64_t timestamp) {
                                  static_cast<uint32_t>(img_undist.rows)}));
     }
   }
-
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
-
+#if USE_RERUN
   if (rec_) {
 
     const auto it{
@@ -1139,12 +1213,12 @@ BagProcessor &BagProcessor::log_poly(int64_t timestamp) {
       }
     }
   }
-
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_track(size_t track_id) {
-
+#if USE_RERUN
   if (rec_) {
     if (image_tracks_.contains(track_id)) {
 
@@ -1267,12 +1341,12 @@ BagProcessor &BagProcessor::log_track(size_t track_id) {
                     .with_radii(rerun::Radius::ui_points(5.0f)));
     }
   }
-
+#endif
   return *this;
 }
 
 BagProcessor &BagProcessor::log_images(int64_t from, int64_t to) {
-#if 0
+#if USE_RERUN
   if (rec_) {
 
     std::mt19937 gen(std::random_device{}());
@@ -1591,6 +1665,7 @@ void BagProcessor::triangulate(ImageTrack &track) const {
 
 BagProcessor &BagProcessor::log_track_directions(size_t track_id,
                                                  float ray_length) {
+#if USE_RERUN
   if (rec_) {
     if (image_tracks_.contains(track_id)) {
 
@@ -1599,12 +1674,15 @@ BagProcessor &BagProcessor::log_track_directions(size_t track_id,
       }
     }
   }
+#endif
 
   return *this;
 }
 
 BagProcessor &BagProcessor::log_direction(size_t track_id, int64_t timestamp,
                                           float ray_length) {
+
+#if USE_RERUN
   if (rec_) {
 
     if (image_tracks_.contains(track_id)) {
@@ -1639,6 +1717,7 @@ BagProcessor &BagProcessor::log_direction(size_t track_id, int64_t timestamp,
       }
     }
   }
+#endif
   return *this;
 }
 
@@ -1886,7 +1965,10 @@ void BagProcessor::extract_images() {
         .compressed_image_topic_ = set_.compressed_image_topic_,
         .path_to_bag_ = set_.bag_path_,
         .timestamp_delta_ = set_.camera_gps_delta_,
-        .rec_ = {}});
+#if USE_RERUN
+        .rec_ = {}
+#endif
+    });
   }
 
 #endif

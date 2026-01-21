@@ -9,7 +9,9 @@
 #include <optional>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/iota.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 #include <span>
 #include <string_view>
 #include <types.hpp>
@@ -23,9 +25,11 @@ std::tuple<std::vector<Eigen::Vector2d>, Eigen::Vector2d>
 get_points_in_the_radius(std::span<const CameraMeasurement> points, double rad,
                          Eigen::Vector2d query_point, ptrdiff_t ind);
 
+#if USE_RERUN
 std::vector<rerun::Vec3D>
 interpolate_spline(std::span<const Eigen::Vector2d> points,
                    Eigen::Vector2d query_point);
+#endif
 
 std::optional<Eigen::Vector2d>
 estimate_direction_spline(std::span<const Eigen::Vector2d> points,

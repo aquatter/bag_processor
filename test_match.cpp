@@ -29,7 +29,9 @@ extern "C" {
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 // #include <opencv2/features2d.hpp>
 // #include <range/v3/view/enumerate.hpp>
 // #include <range/v3/view/filter.hpp>

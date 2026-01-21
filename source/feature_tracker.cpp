@@ -38,12 +38,14 @@
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
 #include <rerun/archetypes/geo_line_strings.hpp>
 #include <rerun/archetypes/geo_points.hpp>
 #include <rerun/components/class_id.hpp>
 #include <rerun/components/geo_line_string.hpp>
 #include <rerun/components/lat_lon.hpp>
+#endif
 #include <track/TrackBase.h>
 #include <track/TrackKLT.h>
 #include <triangulation.hpp>
@@ -252,6 +254,8 @@ struct FeatureTracker::impl {
       const std::unordered_map<int64_t, TrackPoint> &timestamp_to_pose,
       size_t feature_id) {
 
+#if USE_RERUN
+
     if (set_.rec_ == nullptr) {
       return;
     }
@@ -305,6 +309,8 @@ struct FeatureTracker::impl {
                    rerun::GeoLineStrings{directions}
                        .with_colors(rerun::Color{0xfca40bff})
                        .with_radii(rerun::Radius::ui_points(0.5f)));
+
+#endif
   }
 
   void dump_features(
@@ -482,6 +488,8 @@ struct FeatureTracker::impl {
 
   void log_intersections(std::span<const Eigen::Vector2d> points) {
 
+#if USE_RERUN
+
     if (set_.rec_ == nullptr) {
       return;
     }
@@ -501,10 +509,12 @@ struct FeatureTracker::impl {
                    rerun::GeoPoints::from_lat_lon(lla_vec)
                        .with_colors(rerun::Color{0, 255, 0})
                        .with_radii(rerun::Radius::ui_points(4.0f)));
+#endif
   }
 
   void log_points(std::span<const Eigen::Vector3d> points,
                   std::span<const size_t> feature_ids) {
+#if USE_RERUN
 
     if (set_.rec_ == nullptr) {
       return;
@@ -553,6 +563,7 @@ struct FeatureTracker::impl {
                          .with_colors(rerun::Color{255, 0, 0})
                          .with_radii(rerun::Radius::ui_points(4.0f)));
     }
+#endif
   }
 
   FeatureTracker::Settings set_;

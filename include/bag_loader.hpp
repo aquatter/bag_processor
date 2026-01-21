@@ -1,19 +1,24 @@
 #pragma once
+// clang-format off
 #include <cstdint>
 #include <memory>
 #include <opencv2/core.hpp>
+#include <types.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 #include <string>
 #include <string_view>
-#include <types.hpp>
-
+// clang-format on
 class BagLoader : public LoaderBase {
 public:
   struct Settings {
     std::string compressed_image_topic_;
     std::string path_to_bag_;
     int64_t timestamp_delta_;
+#if USE_RERUN
     std::shared_ptr<rerun::RecordingStream> rec_;
+#endif
   };
 
   BagLoader(const Settings &set);

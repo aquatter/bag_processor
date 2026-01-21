@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include <vector>
 
+#define USE_RERUN 0
+
 struct Plane3d {
   Eigen::Vector3d centroid_;
   Eigen::Vector3d normal_;

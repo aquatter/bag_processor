@@ -12,7 +12,9 @@
 #include <ng-log/logging.h>
 #include <opencv2/core.hpp>
 #include <optional>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 #include <serialization.hpp>
 #include <span>
 #include <string>
@@ -74,7 +76,9 @@ public:
 
   BagProcessor &log_gps_path();
   BagProcessor &log_gps_path_map();
+#if USE_RERUN
   BagProcessor &log_landmark_map(Landmark l, rerun::Color color);
+#endif
   BagProcessor &log_landmarks_map(std::span<const Landmark> l);
   BagProcessor &log_ground_truth_landmarks();
   BagProcessor &
@@ -100,8 +104,9 @@ public:
   void save(std::filesystem::path path) const;
 
   [[nodiscard]] static BagProcessor::ptr load(std::filesystem::path path);
-
+#if USE_RERUN
   void set_rerun(std::shared_ptr<rerun::RecordingStream> rec) { rec_ = rec; }
+#endif
 
   const BagProcessorSettings &settings() const { return set_; }
 
@@ -110,6 +115,7 @@ public:
 private:
   void load_calibration(const std::string_view path);
   void load_tracks();
+  void load_tracks_from_parquet();
   void load_measurements(const std::string_view path);
 
   std::vector<Landmark>
@@ -137,7 +143,9 @@ private:
   void report();
 
   BagProcessorSettings set_;
+#if USE_RERUN
   std::shared_ptr<rerun::RecordingStream> rec_;
+#endif
   std::unordered_map<size_t, ImageTrack> image_tracks_;
   std::vector<CameraMeasurement> camera_;
   std::vector<GpsMeasurement> gps_;

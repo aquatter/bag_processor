@@ -27,8 +27,10 @@
 #include <range/v3/view/reverse.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
 #include <rerun_logging.hpp>
+#endif
 #include <span>
 #include <tracks_collecton.hpp>
 #include <triangulation.hpp>
@@ -758,6 +760,7 @@ struct TracksCollection::impl {
   }
 
   void log_current_state() const {
+#if USE_RERUN
     if (rec_) {
 
       rerun::Collection<rerun::components::LatLon> ss;
@@ -788,6 +791,7 @@ struct TracksCollection::impl {
 
       [[maybe_unused]] const auto err{rec_->flush_blocking()};
     }
+#endif
   }
 
   ImageTrack &get_track(const Link &link) {
@@ -807,7 +811,9 @@ struct TracksCollection::impl {
   CartesianConverter converter_;
   CombinedLandmarks landmarks_;
   FeatureMatcher matcher_;
+#if USE_RERUN
   std::shared_ptr<rerun::RecordingStream> rec_;
+#endif
 };
 
 TracksCollection::TracksCollection() : pimpl_{std::make_unique<impl>()} {}
@@ -815,6 +821,8 @@ TracksCollection::~TracksCollection() = default;
 
 void TracksCollection::merge(BagProcessor::ptr bag) { pimpl_->merge(bag); }
 
+#if USE_RERUN
 void TracksCollection::set_rerun(std::shared_ptr<rerun::RecordingStream> rec) {
   pimpl_->rec_ = std::move(rec);
 }
+#endif

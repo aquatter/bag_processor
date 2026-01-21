@@ -7,7 +7,9 @@ public:
   ~TracksCollection();
 
   void merge(BagProcessor::ptr bag);
+#if USE_RERUN
   void set_rerun(std::shared_ptr<rerun::RecordingStream> rec);
+#endif
 
 private:
   struct impl;

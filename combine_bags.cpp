@@ -3,7 +3,9 @@
 #include <fmt/color.h>
 #include <fmt/format.h>
 #include <iostream>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 #include <tracks_collecton.hpp>
 #include <vector>
 
@@ -54,11 +56,13 @@ int main(const int argc, const char *const *argv) {
 
     TracksCollection track_collection{};
 
+#if USE_RERUN
     if (use_logger) {
       auto rec{std::make_shared<rerun::RecordingStream>("bag_converter")};
       rec->connect_grpc().exit_on_failure();
       track_collection.set_rerun(rec);
     }
+#endif
 
     for (auto &&path : input_bags) {
       track_collection.merge(BagProcessor::load(path));

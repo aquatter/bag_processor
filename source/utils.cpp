@@ -32,7 +32,9 @@
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#if USE_RERUN
 #include <rerun.hpp>
+#endif
 #include <span>
 #include <types.hpp>
 #include <unordered_map>
@@ -131,7 +133,7 @@ get_points_in_the_radius(std::span<const CameraMeasurement> points, double rad,
       std::vector<Eigen::Vector2d>{points_queue.begin(), points_queue.end()},
       last_point};
 }
-
+#if USE_RERUN
 std::vector<rerun::Vec3D>
 interpolate_spline(std::span<const Eigen::Vector2d> points,
                    Eigen::Vector2d query_point) {
@@ -196,6 +198,7 @@ interpolate_spline(std::span<const Eigen::Vector2d> points,
 
   return poly_points;
 }
+#endif
 
 std::optional<Eigen::Vector2d>
 estimate_direction_spline(std::span<const Eigen::Vector2d> points,

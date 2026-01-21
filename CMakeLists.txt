@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.10.0)
 project(bag_processor VERSION 0.1.0 LANGUAGES C CXX)
 
-include(FetchContent)
-FetchContent_Declare(rerun_sdk URL https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip)
-FetchContent_MakeAvailable(rerun_sdk)
+# include(FetchContent)
+# FetchContent_Declare(rerun_sdk URL https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip)
+# FetchContent_MakeAvailable(rerun_sdk)
 
 
 find_package(fmt REQUIRED)
@@ -57,16 +57,18 @@ add_executable(${PROJECT_NAME}
     source/bag_loader.cpp
     source/triangulation.cpp
     source/tracks_collection.cpp
-    source/rerun_logging.cpp
     source/cartesian_converter.cpp
     source/mp4_image_loader.cpp
     source/extract_frames.cpp
     source/feature_matcher.cpp
     source/track_merger.cpp
+    source/load_parquet.cpp
     ${ALGLIB_SOURCES}
 )
 
 target_link_libraries(${PROJECT_NAME}
+    Arrow::arrow_shared
+    Parquet::parquet_shared
     PkgConfig::FFMPEG
     ${OpenCV_LIBS}
     fmt::fmt
@@ -76,7 +78,6 @@ target_link_libraries(${PROJECT_NAME}
     sensor_msgs::sensor_msgs_library
     ${GeographicLib_LIBRARIES}
     gtsam
-    rerun_sdk
     nlohmann_json::nlohmann_json
     range-v3::range-v3 range-v3::meta range-v3::concepts
     yaml-cpp::yaml-cpp
@@ -85,8 +86,6 @@ target_link_libraries(${PROJECT_NAME}
     flann::flann
     OpenMP::OpenMP_CXX
     gpmf-extractor
-    Arrow::arrow_shared
-    Parquet::parquet_shared
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -112,12 +111,12 @@ add_executable(combine_bags
     source/bag_loader.cpp
     source/triangulation.cpp
     source/tracks_collection.cpp
-    source/rerun_logging.cpp
     source/cartesian_converter.cpp
     source/feature_matcher.cpp
     source/mp4_image_loader.cpp
     source/extract_frames.cpp
     source/track_merger.cpp
+    source/load_parquet.cpp
     ${ALGLIB_SOURCES}
 )
 
@@ -131,7 +130,6 @@ target_link_libraries(combine_bags
     sensor_msgs::sensor_msgs_library
     ${GeographicLib_LIBRARIES}
     gtsam
-    rerun_sdk
     nlohmann_json::nlohmann_json
     range-v3::range-v3 range-v3::meta range-v3::concepts
     yaml-cpp::yaml-cpp
@@ -188,7 +186,6 @@ target_link_libraries(test_matching PRIVATE
     ${OpenCV_LIBS}
     fmt::fmt
     range-v3::range-v3 range-v3::meta range-v3::concepts
-    rerun_sdk
     Eigen3::Eigen
     # yaml-cpp::yaml-cpp
     # ng-log::ng-log
