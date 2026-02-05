@@ -3,16 +3,19 @@
 #include <boost/math/constants/constants.hpp>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <flann/algorithms/dist.h>
 #include <flann/flann.hpp>
 #include <flann/util/matrix.h>
 #include <fmt/color.h>
 #include <fmt/core.h>
+#include <fstream>
 #include <gtsam/geometry/triangulation.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <interpolation.h>
+#include <ios>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -32,6 +35,7 @@
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
+#include <stdexcept>
 #if USE_RERUN
 #include <rerun.hpp>
 #endif
@@ -686,4 +690,65 @@ size_t combine_landmarks(ImageTrack::map_type &tracks,
 
   return ranges::count_if(
       tracks, [](auto &&val) { return val.second.landmark_.has_value(); });
+}
+
+std::vector<Eigen::Isometry3d> load_colmap_track(const std::string_view path) {
+  std::ifstream f{path.data(), std::ios_base::binary};
+
+  if (not f.is_open() or not f.good()) {
+    throw std::runtime_error{
+        fmt::format("unable to read file {}", path.data())};
+  }
+
+  uint64_t num_reg_images{0};
+  f.read(reinterpret_cast<char *>(&num_reg_images), sizeof(uint64_t));
+
+  std::vector<std::pair<uint32_t, Eigen::Isometry3d>> transforms{};
+
+  for (auto &&i : ints(0ul, num_reg_images)) {
+
+    uint32_t image_id{0};
+    f.read(reinterpret_cast<char *>(&image_id), sizeof(uint32_t));
+
+    double qx{0.0}, qy{0.0}, qz{0.0}, qw{0.0}, tx{0.0}, ty{0.0}, tz{0.0};
+
+    f.read(reinterpret_cast<char *>(&qw), sizeof(double));
+    f.read(reinterpret_cast<char *>(&qx), sizeof(double));
+    f.read(reinterpret_cast<char *>(&qy), sizeof(double));
+    f.read(reinterpret_cast<char *>(&qz), sizeof(double));
+    f.read(reinterpret_cast<char *>(&tx), sizeof(double));
+    f.read(reinterpret_cast<char *>(&ty), sizeof(double));
+    f.read(reinterpret_cast<char *>(&tz), sizeof(double));
+
+    uint32_t camera_id{0};
+    f.read(reinterpret_cast<char *>(&camera_id), sizeof(uint32_t));
+
+    transforms.emplace_back(
+        image_id, Eigen::Isometry3d{
+                      Eigen::Translation3d{tx, ty, tz} *
+                      Eigen::AngleAxisd{Eigen::Quaterniond{qw, qx, qy, qz}}});
+
+    char name_char{};
+    do {
+      f.read(&name_char, 1);
+    } while (name_char != '\0');
+
+    uint64_t num_points2D{0};
+    f.read(reinterpret_cast<char *>(&num_points2D), sizeof(uint64_t));
+
+    for (auto &&j : ints(0ul, num_points2D)) {
+      double x{0.0}, y{0.0};
+      f.read(reinterpret_cast<char *>(&x), sizeof(double));
+      f.read(reinterpret_cast<char *>(&y), sizeof(double));
+
+      uint64_t point3d_id{0};
+      f.read(reinterpret_cast<char *>(&point3d_id), sizeof(uint64_t));
+    }
+  }
+
+  std::sort(transforms.begin(), transforms.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  return transforms | transform([](const auto &val) { return val.second; }) |
+         to<std::vector>();
 }

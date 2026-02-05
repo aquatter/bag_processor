@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Geometry>
+#include <Eigen/src/Geometry/Transform.h>
 #include <boost/math/constants/constants.hpp>
 #include <cartesian_converter.hpp>
 #include <cstddef>
@@ -141,6 +142,7 @@ private:
   void save_geojson(const std::string_view prefix = "",
                     bool save_track = false) const;
   void report();
+  void calculate_camera_poses();
 
   BagProcessorSettings set_;
 #if USE_RERUN
@@ -148,6 +150,7 @@ private:
 #endif
   std::unordered_map<size_t, ImageTrack> image_tracks_;
   std::vector<CameraMeasurement> camera_;
+  std::unordered_map<size_t, Eigen::Isometry3d> camera_poses_;
   std::vector<GpsMeasurement> gps_;
   std::vector<GpsMeasurement> stable_gps_;
   std::unordered_map<int64_t, ImageDetections> image_detections_;

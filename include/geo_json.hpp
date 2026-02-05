@@ -23,7 +23,7 @@ public:
 
     template <typename T>
     Derived &with_property(const std::string_view key, T value) {
-      element_["geometry"][key.data()] = value;
+      element_["properties"][key.data()] = value;
       return static_cast<Derived &>(*this);
     }
 

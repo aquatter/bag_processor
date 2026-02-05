@@ -2,14 +2,19 @@
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
+#include <Eigen/src/Core/Matrix.h>
 #include <boost/math/constants/constants.hpp>
+#include <gtsam/base/Matrix.h>
 #include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/geometry/PinholeCamera.h>
 #include <gtsam/geometry/Point2.h>
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Quaternion.h>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/triangulation.h>
+#include <limits>
+#include <optional>
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/linear_distribute.hpp>
@@ -22,6 +27,51 @@ using ranges::views::enumerate;
 using ranges::views::linear_distribute;
 using ranges::views::transform;
 using ranges::views::zip;
+
+double calculate_point_variance(
+    const gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> &cameras,
+    gtsam::Point3 p3d, double sigma_pix) {
+
+  Eigen::MatrixXd J{};
+  J.resize(2 * cameras.size(), 3);
+  J.setZero();
+
+  for (auto &&[i, camera] : cameras | enumerate) {
+
+    gtsam::Matrix23 Dpoint{};
+    try {
+      camera.project(p3d, std::nullopt, Dpoint);
+    } catch (...) {
+      continue;
+    }
+
+    J.block<2, 3>(2 * i, 0) = -Dpoint;
+  }
+
+  const Eigen::Matrix3d sigma{
+      (J.transpose() * J / (sigma_pix * sigma_pix)).inverse()};
+
+  return sigma.determinant();
+}
+
+double calculare_projection_variance(
+    gtsam::Point3 p3d,
+    const gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> &cameras,
+    const gtsam::Point2Vector &measurements) {
+
+  double sum_squared{0.0};
+  double cnt{0.0};
+
+  for (auto &&[camera, p2d] : zip(cameras, measurements)) {
+    try {
+      sum_squared += (camera.project(p3d) - p2d).squaredNorm();
+      ++cnt;
+    } catch (...) {
+    }
+  }
+
+  return cnt != 0.0 ? sum_squared / cnt : std::numeric_limits<double>::max();
+}
 
 std::vector<double> calculate_distances(
     gtsam::Point3 p3d,
@@ -122,11 +172,12 @@ double calculate_variance(std::span<const double> distances) {
   return var;
 }
 
-std::optional<Landmark>
-triangulate_on_boxes(std::span<const TrackPoint> track) {
+std::optional<Landmark> triangulate_on_boxes(std::span<const TrackPoint> track,
+                                             double sigma_pix) {
 
   gtsam::CameraSet<gtsam::PinholeCamera<gtsam::Cal3_S2>> cameras{};
-  const auto measurement_noise{gtsam::noiseModel::Isotropic::Sigma(2, 5.0)};
+  const auto measurement_noise{
+      gtsam::noiseModel::Isotropic::Sigma(2, sigma_pix)};
 
   for (auto &&track_point : track) {
     cameras.emplace_back(track_point);
@@ -134,6 +185,7 @@ triangulate_on_boxes(std::span<const TrackPoint> track) {
 
   std::vector<Eigen::Vector3d> p3d{};
   std::vector<double> total_distances{};
+  double best_projection_var{std::numeric_limits<double>::max()};
 
   for (auto &&u : linear_distribute(0.0, 1.0, 5)) {
     for (auto &&v : linear_distribute(0.0, 1.0, 5)) {
@@ -163,6 +215,11 @@ triangulate_on_boxes(std::span<const TrackPoint> track) {
         const auto distances{
             calculate_distances(triangulated_point, cameras, measurements)};
 
+        const auto projection_var{calculare_projection_variance(
+            triangulated_point, cameras, measurements)};
+
+        best_projection_var = std::min(projection_var, best_projection_var);
+
         total_distances.insert(total_distances.end(), distances.begin(),
                                distances.end());
 
@@ -178,7 +235,8 @@ triangulate_on_boxes(std::span<const TrackPoint> track) {
     Landmark landmark{};
     landmark.enu_ = plane.centroid_.head<2>();
     landmark.azimuth_ = get_azimmuth(plane.normal_, track);
-    landmark.dist_variance_ = calculate_variance(total_distances);
+    // landmark.dist_variance_ = calculate_variance(total_distances);
+    landmark.dist_variance_ = best_projection_var;
 
     return landmark;
   }

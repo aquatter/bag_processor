@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Eigen/src/Geometry/Transform.h>
 #include <cartesian_converter.hpp>
 #include <cstddef>
 #include <gtsam/geometry/Cal3_S2.h>
@@ -191,3 +192,6 @@ private:
   struct impl;
   std::unique_ptr<impl> pimpl_;
 };
+
+[[nodiscard]] std::vector<Eigen::Isometry3d>
+load_colmap_track(const std::string_view path);

@@ -25,6 +25,10 @@ find_package(PkgConfig REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(Parquet REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(colmap REQUIRED)
+find_package(glog REQUIRED)
+find_package(mongocxx CONFIG REQUIRED)
+find_package(bsoncxx CONFIG REQUIRED)
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat
@@ -32,6 +36,8 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavutil
     libswscale
 )
+
+# pkg_check_modules(mongocxx REQUIRED IMPORTED_TARGET libmongocxx libbsoncxx)
 
 add_subdirectory(open_vins/ov_core)
 add_subdirectory(bag_converter)
@@ -86,6 +92,7 @@ target_link_libraries(${PROJECT_NAME}
     flann::flann
     OpenMP::OpenMP_CXX
     gpmf-extractor
+    # colmap_bridge
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -94,6 +101,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     csvworker
     alglib-cpp
     open_vins/ov_core/src
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -204,3 +212,59 @@ set_target_properties(test_matching PROPERTIES
     CXX_STANDARD_REQUIRED YES
 )
 
+include(GenerateExportHeader)
+
+add_library(colmap_bridge SHARED
+    source/colmap_bridge.cpp
+)
+
+# target_compile_definitions(colmap_bridge PRIVATE GLOG_NO_EXPORT)
+
+target_link_libraries(colmap_bridge PRIVATE
+    glog::glog
+    colmap::colmap
+    fmt::fmt
+    range-v3::range-v3
+    range-v3::meta
+    range-v3::concepts
+    Eigen3::Eigen
+)
+
+set_target_properties(colmap_bridge PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+)
+
+
+target_include_directories(colmap_bridge PRIVATE
+    include
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+generate_export_header(colmap_bridge)
+
+
+add_executable(mongodb_test
+    source/mongodb_test.cpp
+    source/mongodb_connector.cpp
+)
+
+target_link_libraries(mongodb_test PRIVATE
+    fmt::fmt
+    range-v3::range-v3
+    range-v3::meta
+    range-v3::concepts
+    Eigen3::Eigen
+    mongo::bsoncxx_static
+    mongo::mongocxx_static
+    ng-log::ng-log
+)
+
+set_target_properties(mongodb_test PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+)
+
+target_include_directories(mongodb_test PRIVATE
+    include
+)

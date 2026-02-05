@@ -173,7 +173,7 @@ struct ImageTrack {
 
   std::optional<Landmark> landmark_;
   std::vector<size_t> selected_detections_;
-  std::vector<size_t> composed_from_;
+  std::vector<size_t> matched_tracks_;
 
   [[nodiscard]] bool should_be_linked(const ImageTrack &track) const;
   void link(ImageTrack &d);
@@ -200,7 +200,7 @@ struct ImageTrack {
     ar & geodetic_origin_;
     ar & landmark_;
     ar & selected_detections_;
-    ar & composed_from_;
+    ar & matched_tracks_;
 
     if (Archive::is_loading::value) {
       for (auto &&d : dets_) {

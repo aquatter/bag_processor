@@ -3,9 +3,12 @@ CompileFlags:
         - "-ferror-limit=0"
         - "-fopenmp"
         - "--include-directory=/usr/lib/gcc/x86_64-linux-gnu/13/include"
+        - "--include-directory=/usr/local/include/bsoncxx/v_noabi"
+        - "--include-directory=/usr/local/include/mongocxx/v_noabi"
         - "-std=c++20"
 
 Diagnostics: 
     Suppress: 
         - builtin_definition
         - attribute_wrong_number_arguments
+        - conflicting_types

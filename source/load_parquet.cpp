@@ -14,8 +14,8 @@
 #include <ng-log/logging.h>
 #include <nlohmann/json.hpp>
 #include <parquet/arrow/reader.h>
+#include <parquet/exception.h>
 #include <range/v3/view/iota.hpp>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,49 +33,27 @@ load_detections_from_parquet(const std::string_view path) {
     classes_mapping[std::stoul(cls.key())] = cls.value().get<std::string>();
   }
 
-  auto maybe_file{arrow::io::ReadableFile::Open(path.data())};
-
-  if (not maybe_file.ok()) {
-    throw std::runtime_error{
-        fmt::format("failed to open file: {}", maybe_file.status().ToString())};
-  }
-
-  auto input_file{std::static_pointer_cast<arrow::io::RandomAccessFile>(
-      maybe_file.ValueOrDie())};
+  std::shared_ptr<arrow::io::RandomAccessFile> input_file{};
+  PARQUET_ASSIGN_OR_THROW(input_file,
+                          arrow::io::ReadableFile::Open(path.data()));
 
   std::unique_ptr<parquet::arrow::FileReader> parquet_reader{};
-
-  if (auto res{parquet::arrow::OpenFile(
-          input_file, arrow::default_memory_pool(), &parquet_reader)};
-      not res.ok()) {
-    throw std::runtime_error{
-        fmt::format("failed to open file: {}", res.ToString())};
-  }
+  PARQUET_THROW_NOT_OK(parquet::arrow::OpenFile(
+      input_file, arrow::default_memory_pool(), &parquet_reader));
 
   std::shared_ptr<arrow::Table> table{};
-
-  if (auto res{parquet_reader->ReadTable(&table)}; not res.ok()) {
-    throw std::runtime_error{
-        fmt::format("failed to read table: {}", res.ToString())};
-  }
+  PARQUET_THROW_NOT_OK(parquet_reader->ReadTable(&table));
 
   size_t max_sign_track_id{0};
   size_t detection_id{0};
   std::vector<Detection> dets{};
   std::vector<size_t> barrier_dets{};
 
-  LOG(INFO) << "Rows: " << table->num_rows();
-  LOG(INFO) << "Num chunks: "
-            << table->GetColumnByName("frame_index")->num_chunks();
-
   arrow::TableBatchReader batch_reader{*table};
+
   while (true) {
     std::shared_ptr<arrow::RecordBatch> batch{};
-
-    if (auto res{batch_reader.ReadNext(&batch)}; not res.ok()) {
-      throw std::runtime_error{
-          fmt::format("failed to read batch: {}", res.ToString())};
-    }
+    PARQUET_THROW_NOT_OK(batch_reader.ReadNext(&batch));
 
     if (!batch) {
       break;
@@ -139,6 +117,8 @@ load_detections_from_parquet(const std::string_view path) {
       dets.push_back(det);
     }
   }
+
+  LOG(INFO) << "num loaded detections: " << detection_id;
 
   for (auto &&i : barrier_dets) {
     dets[i].track_id_ += max_sign_track_id;

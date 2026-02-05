@@ -75,7 +75,7 @@ struct CombinedLandmarks {
     landmarks_.push_back(std::move(landmark));
   }
 
-  bool contain(Link link) const { return bag_to_landmark_.contains(link); }
+  bool contains(Link link) const { return bag_to_landmark_.contains(link); }
 
   Landmark &at(Link link) { return landmarks_[bag_to_landmark_.at(link)]; }
 
@@ -94,7 +94,7 @@ struct CombinedLandmarks {
   size_t landmark_index(Link link) const { return bag_to_landmark_.at(link); }
 
   void link(Link src, Link dst) {
-    if (contain(dst)) {
+    if (contains(dst)) {
       landmark_to_bag_.at(bag_to_landmark_.at(dst)).emplace_back(src);
       bag_to_landmark_[src] = bag_to_landmark_.at(dst);
     }
@@ -300,7 +300,10 @@ struct TracksCollection::impl {
     converter_ = bag->local_converter_;
     bags_.push_back(bag);
 
+    std::unordered_set<size_t> taken{};
+
     for (auto &&[track_id, track] : bag->image_tracks_) {
+
       if (not track.valid_) {
         continue;
       }
@@ -309,7 +312,21 @@ struct TracksCollection::impl {
         continue;
       }
 
+      if (taken.contains(track_id)) {
+        continue;
+      }
+
+      taken.insert(track_id);
       landmarks_.add({0, track_id}, track.landmark_.value());
+
+      for (auto &&matched_id : track.matched_tracks_) {
+        if (taken.contains(matched_id)) {
+          continue;
+        }
+
+        taken.insert(matched_id);
+        landmarks_.link({0, matched_id}, {0, track_id});
+      }
     }
   }
 
@@ -355,14 +372,13 @@ struct TracksCollection::impl {
     recalculate_coords(bag);
     TrackIndexer indexer_{bags_};
 
+    const size_t this_bag_index{bags_.size()};
     bags_.push_back(bag);
-
-    std::unordered_map<size_t, std::vector<size_t>> should_be_added{};
-    ImageTrack::map_type other_tracks_copy{};
 
     const auto num_valid_tracks{bag->num_valid_tracks()};
     size_t num_track{0};
     std::vector<size_t> affected_landmarks{};
+    std::unordered_set<size_t> taken{};
 
     for (auto &&[track_id, track] : bag->image_tracks_) {
 
@@ -370,19 +386,20 @@ struct TracksCollection::impl {
         continue;
       }
 
+      if (taken.contains(track_id)) {
+        continue;
+      }
+
+      taken.insert(track_id);
+
       ++num_track;
       LOG(INFO) << fmt::format("track {}/{}", num_track, num_valid_tracks);
 
-      const auto found_tracks{indexer_.find({bags_.size() - 1, track_id})};
+      const Link src_link{this_bag_index, track_id};
 
-      if (found_tracks.empty()) {
-        landmarks_.add({bags_.size() - 1, track_id}, track.landmark_.value());
+      const auto found_tracks{indexer_.find(src_link)};
 
-        LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "added ")
-                  << fmt::format(fmt::fg(fmt::color::light_green), "{}:{}",
-                                 track_id, track.code_);
-        continue;
-      }
+      bool matching_failed{true};
 
       for (auto &&res : found_tracks) {
 
@@ -417,7 +434,27 @@ struct TracksCollection::impl {
 
           affected_landmarks.push_back(
               landmarks_.landmark_index(res.dst_link_));
+
+          matching_failed = false;
         }
+      }
+
+      if (matching_failed) {
+
+        landmarks_.add(src_link, track.landmark_.value());
+        for (auto &&matched_id : track.matched_tracks_) {
+          if (taken.contains(matched_id)) {
+            continue;
+          }
+
+          landmarks_.link({this_bag_index, matched_id}, src_link);
+          taken.insert(matched_id);
+        }
+
+        LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral),
+                                 "added because of failed matching ")
+                  << fmt::format(fmt::fg(fmt::color::light_green), "{}:{}",
+                                 track_id, track.code_);
       }
     }
 
@@ -471,7 +508,7 @@ struct TracksCollection::impl {
               q2.push_back(linked_id);
               processed_tracks.insert(linked_id);
 
-              if (landmarks_.contain({bag_ind, linked_id})) {
+              if (landmarks_.contains({bag_ind, linked_id})) {
                 const auto index{
                     landmarks_.landmark_index({bag_ind, linked_id})};
 
@@ -519,7 +556,7 @@ struct TracksCollection::impl {
 
   std::optional<Landmark> try_link(const TrackIndexer::Result &res) const {
 
-    if (not landmarks_.contain(res.dst_link_)) {
+    if (not landmarks_.contains(res.dst_link_)) {
       return std::nullopt;
     }
 
@@ -547,7 +584,7 @@ struct TracksCollection::impl {
 
   bool check_landmarks_proximity(Link link, const ImageTrack &track) const {
 
-    if (not landmarks_.contain(link)) {
+    if (not landmarks_.contains(link)) {
       return false;
     }
 
@@ -560,35 +597,41 @@ struct TracksCollection::impl {
 
   bool check_intersecton(const TrackIndexer::Result &res) {
 
-    std::vector<cv::Point2f> points{};
-
     const auto &dst_track{bags_[res.dst_link_.bag_ind_]->image_tracks_.at(
         res.dst_link_.track_id_)};
 
     const auto &src_track{bags_[res.src_link_.bag_ind_]->image_tracks_.at(
         res.src_link_.track_id_)};
 
-    for (auto &&[dst_det_ind, src_det_ind] : res.det_inds_) {
+    const double dst_intersection_ratio{[&]() {
+      const auto min_max_it{
+          std::minmax_element(res.det_inds_.begin(), res.det_inds_.end(),
+                              [](const auto &a, const auto &b) {
+                                return a.dst_ind_ < b.dst_ind_;
+                              })};
 
-      const auto p0{dst_track.dets_[dst_det_ind].enu_.value()};
-      const auto p1{src_track.dets_[src_det_ind].enu_.value()};
+      return std::abs(dst_track.dets_[min_max_it.second->dst_ind_]
+                          .cumulative_length_ -
+                      dst_track.dets_[min_max_it.first->dst_ind_]
+                          .cumulative_length_) /
+             dst_track.length_;
+    }()};
 
-      points.push_back(
-          {static_cast<float>(p0.x()), static_cast<float>(p0.y())});
-      points.push_back(
-          {static_cast<float>(p1.x()), static_cast<float>(p1.y())});
-    }
+    const double src_intersection_ratio{[&]() {
+      const auto min_max_it{
+          std::minmax_element(res.det_inds_.begin(), res.det_inds_.end(),
+                              [](const auto &a, const auto &b) {
+                                return a.src_ind_ < b.src_ind_;
+                              })};
 
-    const auto rect{cv::minAreaRect(points)};
-    const auto max_dimension{std::max(rect.size.width, rect.size.height)};
+      return std::abs(src_track.dets_[min_max_it.second->src_ind_]
+                          .cumulative_length_ -
+                      src_track.dets_[min_max_it.first->src_ind_]
+                          .cumulative_length_) /
+             src_track.length_;
+    }()};
 
-    const auto dst_length_ratio{max_dimension / dst_track.length_};
-    const auto src_length_ratio{max_dimension / src_track.length_};
-
-    const bool track_intersection{dst_length_ratio >= 0.5 and
-                                  src_length_ratio >= 0.5};
-
-    return track_intersection;
+    return dst_intersection_ratio >= 0.5 and src_intersection_ratio >= 0.5;
   }
 
   bool check_closest_box(const TrackIndexer::Result &res) {

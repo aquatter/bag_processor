@@ -10,7 +10,6 @@
 #include <flann/flann.hpp>
 #include <fmt/color.h>
 #include <fmt/format.h>
-#include <fstream>
 #include <geo_json.hpp>
 #include <limits>
 #include <memory>
@@ -30,7 +29,6 @@
 #include <range/v3/view/join.hpp>
 #include <range/v3/view/transform.hpp>
 #include <range/v3/view/zip.hpp>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <threads.hpp>
@@ -107,6 +105,7 @@ struct TrackMerger::impl {
         taken{};
 
     std::vector<SearchResult> tracks_to_check{};
+    std::vector<size_t> failed_to_link{};
 
     for (auto &&[src_track_id, track] : bag_->image_tracks_) {
       if (not track.valid_) {
@@ -140,6 +139,21 @@ struct TrackMerger::impl {
 
         if (boxes_should_be_checked(index_result)) {
           tracks_to_check.push_back(index_result);
+#if 0
+          cv::Mat_<cv::Vec3b> img = image_loader_.load_image(
+              bag_->image_tracks_.at(index_result.dst_track_id_)
+                  .dets_[index_result.det_indixes_[0].dst_ind_]
+                  .image_id_);
+
+          cv::imwrite("dst_img.png", img);
+
+          img = image_loader_.load_image(
+              bag_->image_tracks_.at(index_result.src_track_id_)
+                  .dets_[index_result.det_indixes_[0].src_ind_]
+                  .image_id_);
+
+          cv::imwrite("src_img.png", img);
+#endif
           continue;
         }
 
@@ -156,6 +170,7 @@ struct TrackMerger::impl {
                     {index_result.dst_track_id_, index_result.src_track_id_})
                     .has_value()) {
           LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+          failed_to_link.push_back(index_result.src_track_id_);
           continue;
         }
 
@@ -214,7 +229,7 @@ struct TrackMerger::impl {
       ProgressBar progress2{images_to_load.size(), "extracting descriptors..."};
       progress2.draw();
 
-      RunInThreads{static_cast<int>(images_to_load.size())}(
+      RunInThreads{images_to_load.size()}(
           [this, &progress2,
            &images_to_load](const RunInThreads::Context &ctx) {
             for (auto &&i : ints(ctx.beg_, ctx.end_)) {
@@ -245,6 +260,7 @@ struct TrackMerger::impl {
                   {search_res.dst_track_id_, search_res.src_track_id_})
                   .has_value()) {
         LOG(INFO) << fmt::format(fmt::fg(fmt::color::coral), "failed");
+        failed_to_link.push_back(search_res.src_track_id_);
         continue;
       }
 
@@ -255,7 +271,7 @@ struct TrackMerger::impl {
     }
 
     LOG(INFO) << "Combining landmarks";
-    combine_landmarks(link_result);
+    combine_landmarks(link_result, failed_to_link);
   }
 
   std::vector<SearchResult> find(const ImageTrack &track) {
@@ -467,7 +483,7 @@ struct TrackMerger::impl {
                                        res.src_track_id_, res.dst_track_id_)};
       progress.draw();
 
-      RunInThreads{static_cast<int>(pairs_to_check.size())}(
+      RunInThreads{pairs_to_check.size()}(
           [this, &pairs_to_check, &dst_track, &dst_dets, &src_track, &src_dets,
            &progress, &num_mismatches,
            &num_checked](const RunInThreads::Context &ctx) {
@@ -860,9 +876,13 @@ struct TrackMerger::impl {
   }
 
   void
-  combine_landmarks(std::span<const std::pair<size_t, size_t>> linked_pairs) {
+  combine_landmarks(std::span<const std::pair<size_t, size_t>> linked_pairs,
+                    std::span<const size_t> failed_to_link) {
 
     if (linked_pairs.empty()) {
+      for (auto &&track_id : failed_to_link) {
+        bag_->image_tracks_.at(track_id).valid_ = false;
+      }
       return;
     }
 
@@ -928,7 +948,7 @@ struct TrackMerger::impl {
 
       std::unordered_map<std::string, Landmark> landmarks{};
 
-      double min_variance_{std::numeric_limits<double>::max()};
+      size_t max_num_samples{0};
       std::string best_code{};
 
       for (auto &&[code, track_ids] : tracks) {
@@ -936,77 +956,51 @@ struct TrackMerger::impl {
 
         if (landmark.has_value()) {
           landmarks[code] = landmark.value();
-          if (landmark.value().dist_variance_ < min_variance_) {
-            min_variance_ = landmark.value().dist_variance_;
+          landmarks.at(code).latlon_ =
+              bag_->local_converter_.latlon(landmarks.at(code).enu_);
+
+          if (track_ids.size() > max_num_samples) {
+            max_num_samples = track_ids.size();
             best_code = code;
           }
         }
       }
 
-      if (not best_code.empty()) {
-        auto best_landmark{landmarks.at(best_code)};
-        best_landmark.latlon_ =
-            bag_->local_converter_.latlon(best_landmark.enu_);
+      Landmark best_landmark{};
 
-        std::vector<size_t> new_track_ids{};
+      if (not best_code.empty()) {
+        best_landmark = landmarks.at(best_code);
+      } else {
+        size_t max_num_samples{0};
 
         for (auto &&[code, track_ids] : tracks) {
-
-          ++next_track_id;
-
-          best_landmark.code_ = code;
-          best_landmark.id_ = next_track_id;
-
-          ImageTrack new_track{};
-          new_track.id_ = next_track_id;
-          new_track.code_ = code;
-          new_track.name_ = bag_->set_.session_name_;
-          new_track.geodetic_origin_ = bag_->local_converter_.origin();
-          new_track.calib_ = bag_->calib_;
-          new_track.landmark_ = best_landmark;
-          new_track.valid_ = true;
-
-          size_t num_dets{0};
-          float max_delta_angle{0.0f};
-          double max_track_length{0.0};
-
           for (auto &&track_id : track_ids) {
+            auto &track{bag_->image_tracks_.at(track_id)};
 
-            auto &old_track{bag_->image_tracks_.at(track_id)};
-            new_track.dets_.insert(new_track.dets_.end(),
-                                   old_track.dets_.begin(),
-                                   old_track.dets_.end());
-
-            for (auto &&det_ind : old_track.selected_detections_) {
-              new_track.selected_detections_.push_back(num_dets + det_ind);
-            }
-
-            num_dets += old_track.dets_.size();
-
-            max_delta_angle = std::max(old_track.delta_angle_, max_delta_angle);
-            max_track_length = std::max(old_track.length_, max_track_length);
-
-            old_track.valid_ = false;
-          }
-
-          new_track.length_ = max_track_length;
-          new_track.delta_angle_ = max_delta_angle;
-          new_track.composed_from_ = track_ids;
-
-          bag_->image_tracks_[next_track_id] = std::move(new_track);
-          new_track_ids.push_back(next_track_id);
-        }
-
-        for (auto &&track_id : new_track_ids) {
-          auto &linked_tracks{bag_->image_tracks_.at(track_id).linked_tracks_};
-
-          for (auto &&track_to_link : new_track_ids) {
-            if (track_to_link == track_id) {
+            if (not track.valid_) {
               continue;
             }
-            linked_tracks.insert(track_to_link);
+
+            if (track.selected_detections_.size() > max_num_samples) {
+              max_num_samples = track.selected_detections_.size();
+              best_landmark = track.landmark_.value();
+            }
           }
         }
+      }
+
+      for (auto &&[code, track_ids] : tracks) {
+        for (auto &&track_id : track_ids) {
+          auto &track{bag_->image_tracks_.at(track_id)};
+          track.landmark_ = best_landmark;
+          track.matched_tracks_ = track_ids;
+        }
+      }
+    }
+
+    for (auto &&track_id : failed_to_link) {
+      if (not g.contains(track_id)) {
+        bag_->image_tracks_.at(track_id).valid_ = false;
       }
     }
   }

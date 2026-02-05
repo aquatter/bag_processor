@@ -1,4 +1,5 @@
 #include <Eigen/Core>
+#include <Eigen/src/Core/Matrix.h>
 #include <boost/math/constants/constants.hpp>
 #include <cmath>
 #include <fmt/color.h>
