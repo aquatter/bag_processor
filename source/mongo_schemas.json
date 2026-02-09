@@ -1,0 +1,69 @@
+{
+    "validationLevel": "strict",
+    "validationAction": "error",
+    "validator": {
+        "$jsonSchema": {
+            "bsonType": "object",
+            "required": [
+                "_id",
+                "camera_type",
+                "model",
+                "K",
+                "D",
+                "resolution",
+                "source",
+                "created_at"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "_id": {
+                    "bsonType": "long"
+                },
+                "camera_type": {
+                    "bsonType": "string"
+                },
+                "model": {
+                    "bsonType": "string"
+                },
+                "K": {
+                    "bsonType": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {
+                        "bsonType": "double"
+                    }
+                },
+                "D": {
+                    "bsonType": "array",
+                    "minItems": 5,
+                    "maxItems": 5,
+                    "items": {
+                        "bsonType": "double"
+                    }
+                },
+                "resolution": {
+                    "bsonType": "object",
+                    "required": [
+                        "width",
+                        "height"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "width": {
+                            "bsonType": "int"
+                        },
+                        "height": {
+                            "bsonType": "int"
+                        }
+                    }
+                },
+                "source": {
+                    "bsonType": "string"
+                },
+                "created_at": {
+                    "bsonType": "date"
+                }
+            }
+        }
+    }
+}

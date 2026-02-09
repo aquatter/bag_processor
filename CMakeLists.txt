@@ -258,6 +258,9 @@ target_link_libraries(mongodb_test PRIVATE
     mongo::bsoncxx_static
     mongo::mongocxx_static
     ng-log::ng-log
+    gtsam
+    nlohmann_json::nlohmann_json
+    ${OpenCV_LIBS}
 )
 
 set_target_properties(mongodb_test PROPERTIES
