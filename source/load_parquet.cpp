@@ -80,9 +80,9 @@ load_detections_from_parquet(const std::string_view path) {
 
       const auto class_idx{class_index->Value(row_num)};
 
-      if (class_idx == unknown_class_index) {
-        continue;
-      }
+      // if (class_idx == unknown_class_index) {
+      //   continue;
+      // }
 
       const auto track_id_str{track_id->Value(row_num)};
       const size_t track_id{std::stoul(track_id_str.substr(2).data())};

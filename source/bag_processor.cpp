@@ -175,6 +175,32 @@ void BagProcessor::calculate() {
 #if 0
   {
 
+    static constexpr size_t image_stamp{586224873333ull};
+
+    Mp4ImageLoader image_loader{set_.bag_path_};
+    cv::Mat_<cv::Vec3b> img = image_loader.load_image(17564);
+
+    if (image_detections_.contains(image_stamp)) {
+
+      for (auto &&d : image_detections_.at(image_stamp).dets_) {
+        cv::rectangle(img, d->box_, {0.0, 0.0, 255.0}, 2);
+        cv::putText(img, d->code_, d->center_, cv::FONT_HERSHEY_COMPLEX, 1.0,
+                    {0.0, 255.0, 0.0}, 2);
+      }
+    }
+
+    cv::imwrite("image_new_tracker.png", img);
+
+    static constexpr size_t track_id{215};
+
+    for (auto &&[i, d] : image_tracks_.at(track_id).dets_ | enumerate) {
+
+      cv::Mat_<cv::Vec3b> img = image_loader.load_image(d.image_id_);
+      cv::rectangle(img, d.box_, {0.0, 0.0, 255.0}, 2);
+
+      cv::imwrite(fmt::format("image_{}.png", i), img);
+    }
+
     // const auto max_image_id{
     //     ranges::max_element(camera_, [](const auto &a, const auto &b) {
     //       return a.image_id_ < b.image_id_;
@@ -183,24 +209,24 @@ void BagProcessor::calculate() {
     // std::vector<size_t> num_detections{};
     // num_detections.resize(max_image_id + 1, 0);
 
-    std::vector<int> det_sizes{};
+    // std::vector<int> det_sizes{};
 
-    for (auto &&cam : camera_) {
-      if (image_detections_.contains(cam.timestamp_)) {
+    // for (auto &&cam : camera_) {
+    //   if (image_detections_.contains(cam.timestamp_)) {
 
-        for (auto &&d : image_detections_.at(cam.timestamp_).dets_) {
-          det_sizes.push_back(d->box_.width);
-        }
-        // num_detections[cam.image_id_] =
-        //     image_detections_.at(cam.timestamp_).dets_.size();
-      }
-    }
+    //     for (auto &&d : image_detections_.at(cam.timestamp_).dets_) {
+    //       det_sizes.push_back(d->box_.width);
+    //     }
+    //     // num_detections[cam.image_id_] =
+    //     //     image_detections_.at(cam.timestamp_).dets_.size();
+    //   }
+    // }
 
-    std::ofstream f{"detection_sizes_old.txt"};
+    // std::ofstream f{"detection_sizes_old.txt"};
 
-    for (auto &&n : det_sizes) {
-      f << n << "\n";
-    }
+    // for (auto &&n : det_sizes) {
+    //   f << n << "\n";
+    // }
   }
 #endif
 

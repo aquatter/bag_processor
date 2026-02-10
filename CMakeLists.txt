@@ -29,6 +29,7 @@ find_package(colmap REQUIRED)
 find_package(glog REQUIRED)
 find_package(mongocxx CONFIG REQUIRED)
 find_package(bsoncxx CONFIG REQUIRED)
+find_package(AWSSDK REQUIRED COMPONENTS s3 core)
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat
@@ -42,8 +43,8 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 add_subdirectory(open_vins/ov_core)
 add_subdirectory(bag_converter)
 
-# get_property(importTargets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY IMPORTED_TARGETS)
-# message("${importTargets}")
+get_property(importTargets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY IMPORTED_TARGETS)
+message("${importTargets}")
 
 file(GLOB ALGLIB_SOURCES alglib-cpp/*.cpp)
 
@@ -92,6 +93,7 @@ target_link_libraries(${PROJECT_NAME}
     flann::flann
     OpenMP::OpenMP_CXX
     gpmf-extractor
+    AWSSDK
     # colmap_bridge
 )
 
@@ -261,6 +263,8 @@ target_link_libraries(mongodb_test PRIVATE
     gtsam
     nlohmann_json::nlohmann_json
     ${OpenCV_LIBS}
+    aws-cpp-sdk-core
+    aws-cpp-sdk-s3
 )
 
 set_target_properties(mongodb_test PROPERTIES

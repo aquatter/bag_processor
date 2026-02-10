@@ -1,4 +1,5 @@
 #include <Eigen/Core>
+#include <aws/core/Aws.h>
 #include <cstdlib>
 #include <exception>
 #include <fmt/color.h>
@@ -13,6 +14,9 @@
 #include <vector>
 
 int main(const int argc, const char *const *argv) {
+
+  Aws::SDKOptions options{};
+  Aws::InitAPI(options);
 
   nglog::InitializeLogging(argv[0]);
   nglog::InstallPrefixFormatter([](std::ostream &s, const nglog::LogMessage &m,
